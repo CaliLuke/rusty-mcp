@@ -41,9 +41,9 @@ Most agent platforms accept either TOML (Codex CLI style) or JSON (Kilo, Cline, 
 
 ```toml
 [mcp_servers.rusty_mem]
-command = "/Users/you/code/rusty-mem/target/release/rusty_mem_mcp"
+command = "/Users/you/code/rusty-mcp/target/release/rusty_mem_mcp"
 args = []
-cwd = "/Users/you/code/rusty-mem"
+cwd = "/Users/you/code/rusty-mcp"
 transport = "stdio"
 
   [mcp_servers.rusty_mem.env]
@@ -70,9 +70,9 @@ transport = "stdio"
 {
   "mcpServers": {
     "rusty": {
-      "command": "/Users/you/code/rusty-mem/target/release/rusty_mem_mcp",
+      "command": "/Users/you/code/rusty-mcp/target/release/rusty_mem_mcp",
       "args": [],
-      "cwd": "/Users/you/code/rusty-mem",
+      "cwd": "/Users/you/code/rusty-mcp",
       "transport": "stdio",
       "env": {
         "QDRANT_URL": "http://127.0.0.1:6333",

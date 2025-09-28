@@ -58,8 +58,8 @@ graph TD
 
 2. **Clone the repo**
    ```bash
-   git clone https://github.com/<your-org>/rusty-mem.git
-   cd rusty-mem
+   git clone https://github.com/CaliLuke/rusty-mcp.git
+   cd rusty-mcp
    ```
 
 3. **Create a `.env`**
@@ -91,7 +91,7 @@ The server listens on `SERVER_PORT` when that variable is set; otherwise it scan
      ```toml
      [mcp_servers.rusty_mem]
      command = "/full/path/to/target/release/rusty_mem_mcp"
-     cwd = "/full/path/to/rusty-mem"
+     cwd = "/full/path/to/rusty-mcp"
      transport = "stdio"
 
        [mcp_servers.rusty_mem.env]
@@ -109,7 +109,7 @@ The server listens on `SERVER_PORT` when that variable is set; otherwise it scan
          "rusty": {
            "command": "/full/path/to/target/release/rusty_mem_mcp",
            "args": [],
-           "cwd": "/full/path/to/rusty-mem",
+           "cwd": "/full/path/to/rusty-mcp",
            "transport": "stdio",
            "env": {
              "QDRANT_URL": "http://127.0.0.1:6333",
@@ -120,12 +120,11 @@ The server listens on `SERVER_PORT` when that variable is set; otherwise it scan
              "OLLAMA_ENDPOINT": "http://127.0.0.1:11434"
            }
          }
+       }
      }
      ```
-   }
-   ```
+
    `TEXT_SPLITTER_CHUNK_SIZE` is now optional; the server infers a sensible value from the embedding model when the variable is omitted.
-   ```
 
 7. **Use the built-in tools**
    - `get-collections` → list available Qdrant collections (`{}` payload).
