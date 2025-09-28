@@ -5,91 +5,42 @@
 [![CI](https://github.com/CaliLuke/rusty-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/CaliLuke/rusty-mcp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue?style=flat-square)](LICENSE)
 
-Rusty Memory MCP (crate: `rustymcp`) is a compact memory server for agents. It provides:
+Rusty Memory MCP (crate: `rustymcp`) is a compact memory server for agents:
 
-- Semantic chunking using `semchunk-rs` with OpenAI‑compatible token counting (`tiktoken-rs`).
-- Automatic, model‑aware chunk sizing (overridable when needed).
-- Embedding generation via pluggable providers (local by default), with vectors stored in Qdrant.
-- Two surfaces: a simple HTTP API and a Model Context Protocol (MCP) stdio server.
+- Splits text into semantic chunks with model‑aware token budgets.
+- Generates embeddings and stores vectors in Qdrant.
+- Exposes both an HTTP API and an MCP stdio server.
 
-## How it works
-
-```mermaid
-graph TD
-    subgraph "Clients"
-        MCP[MCP hosts]
-        HTTP[HTTP callers]
-    end
-
-    subgraph "Rusty Memory"
-        Router[Axum router]
-        Processing[ProcessingService]
-        Chunker[Token chunker]
-        Embed[Deterministic embedding client]
-        QdrantSvc[Qdrant service]
-        Metrics[Ingestion metrics]
-        Config[Config singleton]
-        Logging[Tracing]
-    end
-
-    subgraph "External"
-        VectorDB[Qdrant]
-    end
-
-    MCP --> Processing
-    HTTP --> Router --> Processing
-    Config --> Router
-    Config --> Processing
-    Processing --> Chunker --> Embed --> QdrantSvc --> VectorDB
-    Processing --> Metrics
-    Logging --> MCP
-    Logging --> HTTP
-```
-
-1. Clients call either the HTTP API or the MCP tool set.
-2. The server splits text into semantically coherent chunks using a token budget derived from the embedding model.
-3. Embeddings are produced via the configured provider.
-4. Chunks + vectors are written to Qdrant.
-5. Metrics record documents/chunks processed and the most recent chunk size.
+See internals and architecture in docs/Design.md.
 
 ## Quick start
 
-1. **Install prerequisites**
-   - Rust toolchain (`rustup`), including `rustfmt` and `clippy`.
-   - Qdrant (Docker, container, or local install) reachable at `http://127.0.0.1:6333` by default.
-   - Optional: Ollama (`brew install ollama` or platform equivalent) for local embeddings.
-
-2. **Clone the repo**
-   ```bash
-   git clone https://github.com/CaliLuke/rusty-mcp.git
-   cd rusty-mcp
-   ```
-
-3. **Create a `.env`**
-   ```bash
-   cp .env.example .env
-   # adjust values as needed
-   ```
-
 4. **Install the CLI (recommended)**
    Skip local builds by installing the published binary:
+
    ```bash
    cargo install rustymcp
    ```
+
    This places three executables in `~/.cargo/bin`:
    - `rustymcp` → HTTP server entrypoint
    - `rusty_mem_mcp` → MCP stdio server
    - `metrics-post` → helper used by the metrics script
 
 5. **Run the MCP server**
+
    ```bash
    cargo run --bin rusty_mem_mcp
    ```
+
    or, if you installed the crate, launch it directly:
+
    ```bash
    ~/.cargo/bin/rusty_mem_mcp
    ```
+
    Building from source once also works:
+
    ```bash
    cargo build --release --bin rusty_mem_mcp
    ./target/release/rusty_mem_mcp
@@ -111,6 +62,7 @@ or, using the installed binary:
 
 7. **Point your agent at the server**
    - Codex CLI (TOML):
+
      ```toml
      [mcp_servers.rusty_mem]
      command = "/full/path/to/target/release/rusty_mem_mcp"
@@ -125,7 +77,9 @@ or, using the installed binary:
        EMBEDDING_DIMENSION = "768"
        OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
      ```
+
    - JSON-based clients (Kilo, Cline, Roo Code):
+
      ```json
      {
        "mcpServers": {
