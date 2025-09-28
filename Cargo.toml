@@ -3,6 +3,12 @@ name = "rusty-mem"
 version = "0.1.0"
 edition = "2024"
 default-run = "rusty-mem"
+description = "Rusty Memory is a no-fuss memory server for coding agents."
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/CaliLuke/rusty-mem"
+readme = "README.md"
+keywords = ["mcp", "memory", "vector", "ai", "qdrant"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.86"
