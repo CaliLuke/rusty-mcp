@@ -31,7 +31,7 @@ impl RustyMemMcpServer {
                 name: Cow::Borrowed("push"),
                 title: Some("Index Document".to_string()),
                 description: Some(Cow::Borrowed(
-                    "Split the provided text, embed each chunk, and upsert into Qdrant. Required: `text` (string). Optional: `collection` (string) overrides the default target. Example: {\n  \"text\": \"docs about user onboarding\",\n  \"collection\": \"support-notes\"\n}.",
+                    "Split the provided text, embed each chunk, and upsert into Qdrant. The result payload includes `chunksIndexed` and `chunkSize` so hosts can track the applied budget. Required: `text` (string). Optional: `collection` (string) overrides the default target. Example: {\n  \"text\": \"docs about user onboarding\",\n  \"collection\": \"support-notes\"\n}.",
                 )),
                 input_schema: Arc::new(index_input_schema()),
                 output_schema: None,
@@ -106,7 +106,7 @@ impl ServerHandler for RustyMemMcpServer {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: implementation,
             instructions: Some(
-                "Rusty Memory MCP usage:\n1. Call get-collections to discover existing Qdrant collections (pass {}).\n2. To create or update a collection, call new-collection with { \"name\": <collection>, \"vector_size\": <optional dimension> }.\n3. Push content with push using { \"text\": <document>, \"collection\": <optional override> }.\n4. Inspect ingestion counters via metrics (pass {}) to confirm documents were processed.\nAll tool responses return structured JSON; prefer the structured payload over the text summary.".into(),
+                "Rusty Memory MCP usage:\n1. Call get-collections to discover existing Qdrant collections (pass {}).\n2. To create or update a collection, call new-collection with { \"name\": <collection>, \"vector_size\": <optional dimension> }.\n3. Push content with push using { \"text\": <document>, \"collection\": <optional override> }. The response includes both `chunksIndexed` and `chunkSize`.\n4. Inspect ingestion counters via metrics (pass {}) to confirm documents were processed; the result echoes `lastChunkSize`.\nAll tool responses return structured JSON; prefer the structured payload over the text summary.".into(),
             ),
             ..ServerInfo::default()
         }
@@ -138,14 +138,15 @@ impl ServerHandler for RustyMemMcpServer {
                         .collection
                         .unwrap_or_else(|| get_config().qdrant_collection_name.clone());
                     let text = args.text;
-                    let chunks = processing
+                    let outcome = processing
                         .process_and_index(&collection, text)
                         .await
                         .map_err(|err| McpError::internal_error(err.to_string(), None))?;
                     Ok(CallToolResult::structured(json!({
                         "status": "ok",
                         "collection": collection,
-                        "chunksIndexed": chunks,
+                        "chunksIndexed": outcome.chunk_count,
+                        "chunkSize": outcome.chunk_size,
                     })))
                 }
                 "get-collections" => {
@@ -180,6 +181,7 @@ impl ServerHandler for RustyMemMcpServer {
                     Ok(CallToolResult::structured(json!({
                         "documentsIndexed": snapshot.documents_indexed,
                         "chunksIndexed": snapshot.chunks_indexed,
+                        "lastChunkSize": snapshot.last_chunk_size,
                     })))
                 }
                 other => Err(McpError::invalid_params(

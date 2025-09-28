@@ -14,7 +14,7 @@ Rusty Memory reads its configuration from environment variables once at startup.
 | `EMBEDDING_PROVIDER`       | Logical provider name used for logging and future provider-specific behaviour. Accepted values today: `ollama`, `openai`.      | `ollama`                          |
 | `EMBEDDING_MODEL`          | Model identifier passed to the embedding client. For Ollama, this is the model tag; for cloud providers, use their model slug. | `nomic-embed-text`                |
 | `EMBEDDING_DIMENSION`      | Vector length expected by the target collection. Must match the embedding model’s output dimension.                            | `768`                             |
-| `TEXT_SPLITTER_CHUNK_SIZE` | Maximum token count per chunk. The chunker counts whitespace-delimited tokens.                                                 | `1024`                            |
+| `TEXT_SPLITTER_CHUNK_SIZE` | Optional chunk-size override. The server infers a model-aware value when unset.                                                | `1024`                            |
 | `SERVER_PORT`              | Optional fixed HTTP port. When unset, the server picks the first free port in `4100-4199`.                                     | `4123`                            |
 | `OLLAMA_ENDPOINT`          | Base URL of the Ollama server. Required when `EMBEDDING_PROVIDER=ollama`.                                                      | `http://127.0.0.1:11434`          |
 | `RUSTY_MEM_LOG_FILE`       | Optional absolute path for structured logs. When omitted, logs go to `logs/rusty-mem.log`.                                     | `/Users/you/rusty-mem.log`        |
@@ -52,9 +52,10 @@ transport = "stdio"
   EMBEDDING_PROVIDER = "ollama"
   EMBEDDING_MODEL = "nomic-embed-text"
   EMBEDDING_DIMENSION = "768"
-  TEXT_SPLITTER_CHUNK_SIZE = "1024"
   OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
 ```
+
+`TEXT_SPLITTER_CHUNK_SIZE` is optional—omit it unless you need a specific chunk size.
 
 **Step-by-step for new users**
 
@@ -79,13 +80,14 @@ transport = "stdio"
         "EMBEDDING_PROVIDER": "ollama",
         "EMBEDDING_MODEL": "nomic-embed-text",
         "EMBEDDING_DIMENSION": "768",
-        "TEXT_SPLITTER_CHUNK_SIZE": "1024",
         "OLLAMA_ENDPOINT": "http://127.0.0.1:11434"
       }
     }
-  }
+}
 }
 ```
+
+As with the TOML example, only add `TEXT_SPLITTER_CHUNK_SIZE` if you want to override the automatic chunker budget.
 
 **Step-by-step for new users**
 
@@ -104,7 +106,7 @@ transport = "stdio"
 
 1. Launch the MCP binary manually. You should see logs similar to `Initializing embedding client` followed by `Service initialized as client` once an MCP host connects.
 2. From your agent, run the `get-collections` tool. An empty array is fine the first time.
-3. Run the `push` tool with a short piece of text. Check the `metrics` tool—`documentsIndexed` and `chunksIndexed` should increment.
+3. Run the `push` tool with a short piece of text. Check the `metrics` tool—`documentsIndexed`, `chunksIndexed`, and `lastChunkSize` (when available) should reflect the ingestion.
 4. Inspect Qdrant (via UI or `curl`) to confirm the collection contains points.
 
 You are now ready to use Rusty Memory as the backing store for your coding agent. If you run into issues or have ideas that would help new developers, please open an issue—accessibility and simplicity are the project’s north stars.

@@ -25,8 +25,8 @@ pub struct Config {
     pub qdrant_api_key: Option<String>,
     /// Embedding provider used to generate vector representations.
     pub embedding_provider: EmbeddingProvider,
-    /// Maximum token count used when chunking documents.
-    pub text_splitter_chunk_size: usize,
+    /// Optional override for the automatic chunk size selection.
+    pub text_splitter_chunk_size: Option<usize>,
     /// Embedding model identifier passed to the provider.
     pub embedding_model: String,
     /// Dimensionality of the produced vectors.
@@ -55,9 +55,13 @@ impl Config {
             embedding_provider: load_env("EMBEDDING_PROVIDER")?.parse().map_err(|()| {
                 ConfigError::MissingVariable("Invalid EMBEDDING_PROVIDER".to_string())
             })?,
-            text_splitter_chunk_size: load_env("TEXT_SPLITTER_CHUNK_SIZE")?.parse().map_err(
-                |_| ConfigError::MissingVariable("Invalid TEXT_SPLITTER_CHUNK_SIZE".to_string()),
-            )?,
+            text_splitter_chunk_size: load_env_optional("TEXT_SPLITTER_CHUNK_SIZE")
+                .map(|value| {
+                    value.parse().map_err(|_| {
+                        ConfigError::InvalidValue("TEXT_SPLITTER_CHUNK_SIZE".to_string())
+                    })
+                })
+                .transpose()?,
             embedding_model: load_env("EMBEDDING_MODEL")?,
             embedding_dimension: load_env("EMBEDDING_DIMENSION")?.parse().map_err(|_| {
                 ConfigError::MissingVariable("Invalid EMBEDDING_DIMENSION".to_string())

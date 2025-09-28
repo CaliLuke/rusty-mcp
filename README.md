@@ -44,7 +44,7 @@ graph TD
 ```
 
 1. Clients call either the HTTP API or the MCP tool set.
-2. `ProcessingService` chunks the document using a configurable token budget (`TEXT_SPLITTER_CHUNK_SIZE`).
+2. `ProcessingService` picks a model-aware token budget (override with `TEXT_SPLITTER_CHUNK_SIZE` only when you need to fine-tune it).
 3. The embedding client produces deterministic vectors (Ollama by default; other providers available via env vars).
 4. Chunks and vectors land in Qdrant with UUID identifiers.
 5. Metrics record how many documents and chunks have been processed.
@@ -79,10 +79,12 @@ graph TD
    ```
 
 5. **Run the HTTP server** (optional if you only need MCP)
-   ```bash
-   cargo run
-   ```
-   The server listens on `SERVER_PORT` when that variable is set; otherwise it scans `4100-4199` and binds the first available port.
+
+```bash
+cargo run
+```
+
+The server listens on `SERVER_PORT` when that variable is set; otherwise it scans `4100-4199` and binds the first available port. Successful `POST /index` calls return `{ "chunks_indexed": <count>, "chunk_size": <tokens> }` so callers can observe the automatic budget.
 
 6. **Point your agent at the server**
    - For Codex CLI (TOML):
@@ -98,7 +100,6 @@ graph TD
        EMBEDDING_PROVIDER = "ollama"
        EMBEDDING_MODEL = "nomic-embed-text"
        EMBEDDING_DIMENSION = "768"
-       TEXT_SPLITTER_CHUNK_SIZE = "1024"
        OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
      ```
    - For JSON-based clients (Kilo, Cline, Roo Code):
@@ -116,19 +117,22 @@ graph TD
              "EMBEDDING_PROVIDER": "ollama",
              "EMBEDDING_MODEL": "nomic-embed-text",
              "EMBEDDING_DIMENSION": "768",
-             "TEXT_SPLITTER_CHUNK_SIZE": "1024",
              "OLLAMA_ENDPOINT": "http://127.0.0.1:11434"
            }
          }
-       }
      }
      ```
+   }
+   ```
+   `TEXT_SPLITTER_CHUNK_SIZE` is now optional; the server infers a sensible value from the embedding model when the variable is omitted.
+   ```
 
 7. **Use the built-in tools**
    - `get-collections` → list available Qdrant collections (`{}` payload).
    - `new-collection` → create or resize (`{ "name": "docs", "vector_size": 768 }`).
-   - `push` → ingest (`{ "text": "my note", "collection": "docs" }`).
+   - `push` → ingest (`{ "text": "my note", "collection": "docs" }`). The response echoes `chunksIndexed` and the effective `chunkSize`.
    - `metrics` → check `{ "documentsIndexed": …, "chunksIndexed": … }`.
+     When documents have been ingested, the payload also includes `lastChunkSize`.
 
 ## Docker Compose example
 

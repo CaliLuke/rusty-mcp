@@ -31,7 +31,7 @@ The server loads configuration from environment variables via `dotenvy`:
 | `EMBEDDING_PROVIDER`       | `ollama` or `openai`.                                                                       |
 | `EMBEDDING_MODEL`          | Provider-specific model identifier (e.g. `nomic-embed-text`).                               |
 | `EMBEDDING_DIMENSION`      | Vector dimensionality expected by the target collection.                                    |
-| `TEXT_SPLITTER_CHUNK_SIZE` | Maximum token count for the whitespace-based chunker.                                       |
+| `TEXT_SPLITTER_CHUNK_SIZE` | Optional chunk-size override. Auto-derived from the embedding model when unset.             |
 | `SERVER_PORT`              | Optional fixed HTTP port. If absent, the server selects the first open port in `4100-4199`. |
 | `RUSTY_MEM_LOG_FILE`       | Optional absolute path for structured logs. Defaults to `logs/rusty-mem.log`.               |
 
@@ -39,6 +39,8 @@ The server loads configuration from environment variables via `dotenvy`:
 
 - HTTP API: `cargo run` launches the Axum server.
 - MCP server: `cargo run --bin rusty_mem_mcp` (or execute the release binary at `target/release/rusty_mem_mcp`).
+
+Both surfaces expose the derived chunk size: `POST /index` returns `chunkSize`, and the metrics endpoint/tool includes `lastChunkSize` alongside document and chunk counters.
 
 ## Git Hooks and Automation
 
@@ -70,6 +72,7 @@ prek run --all-files         # evaluate all hooks locally
 ## Code Quality Expectations
 
 - **Documentation:** `#![deny(missing_docs)]` is active; every public item must carry a Rustdoc comment. The doc build (and therefore the hooks) will fail if coverage regresses.
+- **Inline comments:** Annotate non-trivial control flow or heuristics with a brief `// why` comment so future learners understand the rationale. Pull requests that introduce logic without commentary are expected to add it during review.
 - **Formatting:** follow `rustfmt` defaults. Markdown changes must pass `dprint fmt`.
 - **Linting:** `cargo clippy --all-targets --all-features -D warnings` is enforced.
 - **Tests:** keep unit tests colocated with the code, ensure deterministic behaviour, and favour descriptive names (`behavior_under_condition`).

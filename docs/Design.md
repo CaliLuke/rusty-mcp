@@ -55,7 +55,7 @@ graph TD
 1. Configuration is loaded once via `config::init_config()`; subsequent reads use the cached instance.
 2. The HTTP server binds to `SERVER_PORT` when provided or the first free port in `4100-4199`.
 3. `ProcessingService::process_and_index` performs the ingestion steps:
-   - Split the document with `semchunk_rs::Chunker` using the configured token budget (`TEXT_SPLITTER_CHUNK_SIZE`). The chunker counts whitespace-delimited tokens and does not yet apply semantic grouping.
+   - Split the document with `semchunk_rs::Chunker` using an automatically derived token budget (override with `TEXT_SPLITTER_CHUNK_SIZE` when needed).
    - Generate deterministic embeddings for each chunk through `embedding::AiLibClient`. The current implementation hashes bytes into a normalised vector of length `EMBEDDING_DIMENSION`.
    - Ensure the target Qdrant collection exists (`QdrantService::create_collection_if_not_exists`) and upload the chunks with randomly generated UUIDs.
    - Update the `CodeMetrics` counters with the number of documents and chunks processed.
@@ -65,13 +65,13 @@ graph TD
 
 ### HTTP API
 
-| Method & Path       | Description                                               | Request Body                                 | Success Response                                                           |
-| ------------------- | --------------------------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------- |
-| `POST /index`       | Index a document into the default or provided collection. | `{ "text": string, "collection"?: string }`  | `200 OK` with empty JSON body.                                             |
-| `GET /collections`  | List available Qdrant collections.                        | _None_                                       | `200 OK` with `{ "collections": [string] }`.                               |
-| `POST /collections` | Create or resize a collection.                            | `{ "name": string, "vector_size"?: number }` | `200 OK` with empty JSON body.                                             |
-| `GET /metrics`      | Read cumulative ingestion counters.                       | _None_                                       | `200 OK` with `{ "documents_indexed": number, "chunks_indexed": number }`. |
-| `GET /commands`     | Provide a machine-readable command catalog for MCP hosts. | _None_                                       | `200 OK` with structured command descriptors.                              |
+| Method & Path       | Description                                               | Request Body                                 | Success Response                                                                                       |
+| ------------------- | --------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `POST /index`       | Index a document into the default or provided collection. | `{ "text": string, "collection"?: string }`  | `200 OK` with `{ "chunks_indexed": number, "chunk_size": number }`.                                    |
+| `GET /collections`  | List available Qdrant collections.                        | _None_                                       | `200 OK` with `{ "collections": [string] }`.                                                           |
+| `POST /collections` | Create or resize a collection.                            | `{ "name": string, "vector_size"?: number }` | `200 OK` with empty JSON body.                                                                         |
+| `GET /metrics`      | Read cumulative ingestion counters.                       | _None_                                       | `200 OK` with `{ "documents_indexed": number, "chunks_indexed": number, "last_chunk_size"?: number }`. |
+| `GET /commands`     | Provide a machine-readable command catalog for MCP hosts. | _None_                                       | `200 OK` with structured command descriptors.                                                          |
 
 All handlers return `500 Internal Server Error` with a descriptive message when the processing pipeline fails.
 
@@ -90,24 +90,24 @@ During `initialize`, the server shares usage instructions that mirror the four-s
 
 ## Configuration
 
-| Environment Variable       | Details                                                                                 |
-| -------------------------- | --------------------------------------------------------------------------------------- |
-| `QDRANT_URL`               | Base URL of the Qdrant REST API (e.g. `http://127.0.0.1:6333`).                         |
-| `QDRANT_COLLECTION_NAME`   | Default collection for `push` operations.                                               |
-| `QDRANT_API_KEY`           | Optional API key forwarded via the `api-key` header.                                    |
-| `EMBEDDING_PROVIDER`       | Logical provider name (`ollama` or `openai`); stored for logging only today.            |
-| `EMBEDDING_MODEL`          | Free-form model identifier included in logging.                                         |
-| `EMBEDDING_DIMENSION`      | Vector dimension used when creating collections and generating embeddings.              |
-| `TEXT_SPLITTER_CHUNK_SIZE` | Maximum token count for each chunk (whitespace-delimited).                              |
-| `SERVER_PORT`              | Optional fixed port for the HTTP server.                                                |
-| `RUSTY_MEM_LOG_FILE`       | When set, directs structured logs to the provided path instead of `logs/rusty-mem.log`. |
+| Environment Variable       | Details                                                                                        |
+| -------------------------- | ---------------------------------------------------------------------------------------------- |
+| `QDRANT_URL`               | Base URL of the Qdrant REST API (e.g. `http://127.0.0.1:6333`).                                |
+| `QDRANT_COLLECTION_NAME`   | Default collection for `push` operations.                                                      |
+| `QDRANT_API_KEY`           | Optional API key forwarded via the `api-key` header.                                           |
+| `EMBEDDING_PROVIDER`       | Logical provider name (`ollama` or `openai`); stored for logging only today.                   |
+| `EMBEDDING_MODEL`          | Free-form model identifier included in logging.                                                |
+| `EMBEDDING_DIMENSION`      | Vector dimension used when creating collections and generating embeddings.                     |
+| `TEXT_SPLITTER_CHUNK_SIZE` | Optional chunk-size override. When omitted, the server infers a size from the embedding model. |
+| `SERVER_PORT`              | Optional fixed port for the HTTP server.                                                       |
+| `RUSTY_MEM_LOG_FILE`       | When set, directs structured logs to the provided path instead of `logs/rusty-mem.log`.        |
 
 The configuration module also honours provider-specific environment variables consumed by downstream tooling (for example, `OPENAI_API_KEY`).
 
 ## Observability
 
 - **Logging:** `logging::init_tracing` installs a compact formatter to stdout and an optional non-blocking file appender. Log level defaults to `info` and respects `RUST_LOG` if provided.
-- **Metrics:** `metrics::CodeMetrics` exposes `metrics_snapshot`, and the MCP `metrics` tool returns the same data. There is no Prometheus exporter yet.
+- **Metrics:** `metrics::CodeMetrics` exposes `metrics_snapshot`, including `last_chunk_size` for the most recent ingestion. The HTTP `/metrics` endpoint and the MCP tool return the same data. There is no Prometheus exporter yet.
 - **Reports:** `scripts/metrics.sh` can generate snapshots for coverage, complexity, debtmap, unused dependencies, and LOC. When `METRICS_SOFT=1`, outputs are written to a temporary directory; manual runs populate `reports/`.
 
 ## Quality Gates

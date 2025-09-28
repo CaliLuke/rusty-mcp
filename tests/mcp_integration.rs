@@ -221,6 +221,20 @@ async fn index_tool_invokes_processing() {
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["collection"], "mcp-test");
     assert!(payload["chunksIndexed"].as_u64().is_some());
+    assert!(payload["chunkSize"].as_u64().is_some());
+
+    let metrics_response = service
+        .call_tool(CallToolRequestParam {
+            name: "metrics".into(),
+            arguments: Some(json!({}).as_object().unwrap().clone()),
+        })
+        .await
+        .expect("metrics tool call");
+    assert_eq!(metrics_response.is_error, Some(false));
+    let metrics_payload = metrics_response
+        .structured_content
+        .expect("structured metrics payload");
+    assert!(metrics_payload["lastChunkSize"].as_u64().is_some());
 
     harness.shutdown().await;
 }

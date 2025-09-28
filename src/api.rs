@@ -31,22 +31,32 @@ struct IndexRequest {
     collection: Option<String>,
 }
 
+#[derive(Serialize)]
+struct IndexResponse {
+    chunks_indexed: usize,
+    chunk_size: usize,
+}
+
 async fn index_document(
     State(service): State<Arc<ProcessingService>>,
     Json(request): Json<IndexRequest>,
-) -> Result<(), AppError> {
+) -> Result<Json<IndexResponse>, AppError> {
     let collection_name = request
         .collection
         .unwrap_or_else(|| get_config().qdrant_collection_name.clone());
-    let chunks_indexed = service
+    let outcome = service
         .process_and_index(&collection_name, request.text)
         .await?;
     tracing::info!(
         collection = collection_name,
-        chunks = chunks_indexed,
+        chunks = outcome.chunk_count,
+        chunk_size = outcome.chunk_size,
         "Index request completed"
     );
-    Ok(())
+    Ok(Json(IndexResponse {
+        chunks_indexed: outcome.chunk_count,
+        chunk_size: outcome.chunk_size,
+    }))
 }
 
 #[derive(Serialize)]
@@ -85,6 +95,7 @@ async fn get_metrics(
     Ok(Json(MetricsResponse {
         documents_indexed: snapshot.documents_indexed,
         chunks_indexed: snapshot.chunks_indexed,
+        last_chunk_size: snapshot.last_chunk_size,
     }))
 }
 
@@ -92,6 +103,8 @@ async fn get_metrics(
 struct MetricsResponse {
     documents_indexed: u64,
     chunks_indexed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_chunk_size: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -116,7 +129,7 @@ async fn get_commands() -> Json<CommandsResponse> {
                 name: "index",
                 method: "POST",
                 path: "/index",
-                description: "Chunk a raw document, generate embeddings, and persist them in Qdrant.",
+                description: "Chunk a raw document, generate embeddings, and persist them in Qdrant. Response returns { \"chunks_indexed\": number, \"chunk_size\": number }.",
                 request_example: Some(json!({
                     "text": "Document contents",
                     "metadata": {

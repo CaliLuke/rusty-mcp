@@ -16,6 +16,7 @@ thiserror = "1.0.61"
 tokio = { version = "1.38.0", features = ["full"] }
 uuid = { version = "1.8.0", features = ["v4"] }
 semchunk-rs = "0.1.1"
+tiktoken-rs = "0.7"
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
