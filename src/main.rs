@@ -1,4 +1,4 @@
-use rusty_mem::{api, config, logging, processing};
+use rustymcp::{api, config, logging, processing};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 

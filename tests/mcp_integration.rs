@@ -8,7 +8,7 @@ use rmcp::{
     service::{RoleClient, RoleServer, RunningService, Service, serve_directly},
     transport::async_rw::AsyncRwTransport,
 };
-use rusty_mem::{config, logging, mcp::RustyMemMcpServer, processing::ProcessingService};
+use rustymcp::{config, logging, mcp::RustyMemMcpServer, processing::ProcessingService};
 use serde_json::json;
 use tokio::{io::split, sync::OnceCell};
 

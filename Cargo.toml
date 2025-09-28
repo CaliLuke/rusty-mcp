@@ -10,10 +10,6 @@ readme = "README.md"
 keywords = ["mcp", "memory", "vector", "ai", "qdrant"]
 categories = ["command-line-utilities"]
 
-[lib]
-name = "rusty_mem"
-path = "src/lib.rs"
-
 [dependencies]
 anyhow = "1.0.86"
 async-trait = "0.1.80"

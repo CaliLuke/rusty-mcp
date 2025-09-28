@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rmcp::{service::ServiceExt, transport::stdio};
-use rusty_mem::{config, logging, mcp::RustyMemMcpServer, processing};
+use rustymcp::{config, logging, mcp::RustyMemMcpServer, processing};
 use std::sync::Arc;
 
 #[tokio::main]
