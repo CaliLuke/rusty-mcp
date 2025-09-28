@@ -6,23 +6,22 @@ This document explains every configuration option supported by Rusty Memory and 
 
 Rusty Memory reads its configuration from environment variables once at startup. The easiest way to manage them is to copy `.env.example` to `.env` and edit the values. The table below lists each variable, what it does, and typical values.
 
-| Variable                   | Description                                                                                                                    | Example                           |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
-| `QDRANT_URL`               | Base URL for the Qdrant HTTP API.                                                                                              | `http://127.0.0.1:6333`           |
-| `QDRANT_COLLECTION_NAME`   | Default collection name used when `push` does not provide one.                                                                 | `rusty-mem`                       |
-| `QDRANT_API_KEY`           | Optional API key for secured Qdrant deployments. Leave empty for local installs.                                               | `supersecretapikey`               |
-| `EMBEDDING_PROVIDER`       | Logical provider name used for logging and future provider-specific behaviour. Accepted values today: `ollama`, `openai`.      | `ollama`                          |
-| `EMBEDDING_MODEL`          | Model identifier passed to the embedding client. For Ollama, this is the model tag; for cloud providers, use their model slug. | `nomic-embed-text`                |
-| `EMBEDDING_DIMENSION`      | Vector length expected by the target collection. Must match the embedding model’s output dimension.                            | `768`                             |
-| `TEXT_SPLITTER_CHUNK_SIZE` | Optional chunk-size override. The server infers a model-aware value when unset.                                                | `1024`                            |
-| `SERVER_PORT`              | Optional fixed HTTP port. When unset, the server picks the first free port in `4100-4199`.                                     | `4123`                            |
-| `OLLAMA_ENDPOINT`          | Base URL of the Ollama server. Required when `EMBEDDING_PROVIDER=ollama`.                                                      | `http://127.0.0.1:11434`          |
-| `RUSTY_MEM_LOG_FILE`       | Optional absolute path for structured logs. When omitted, logs go to `logs/rusty-mem.log`.                                     | `/Users/you/rusty-mem.log`        |
-| `RUST_LOG`                 | Standard Rust logging filter if you need more or less verbosity.                                                               | `rusty_mem=debug,tower_http=info` |
+| Variable                   | Description                                                                                          | Example                           |
+| -------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------- |
+| `QDRANT_URL`               | Base URL for the Qdrant HTTP API.                                                                    | `http://127.0.0.1:6333`           |
+| `QDRANT_COLLECTION_NAME`   | Default collection name used when `push` does not provide one.                                       | `rusty-mem`                       |
+| `QDRANT_API_KEY`           | Optional API key for secured Qdrant deployments. Leave empty for local installs.                     | `supersecretapikey`               |
+| `EMBEDDING_PROVIDER`       | Logical provider name used for logging. Accepted values today: `ollama`, `openai`.                   | `ollama`                          |
+| `EMBEDDING_MODEL`          | Free-form model identifier included in logs and used for chunk-size hints.                           | `nomic-embed-text`                |
+| `EMBEDDING_DIMENSION`      | Vector length expected by the target collection. Must match your embedding model’s output dimension. | `768`                             |
+| `TEXT_SPLITTER_CHUNK_SIZE` | Optional chunk-size override. The server infers a model-aware value when unset.                      | `1024`                            |
+| `SERVER_PORT`              | Optional fixed HTTP port. When unset, the server picks the first free port in `4100-4199`.           | `4123`                            |
+| `RUSTY_MEM_LOG_FILE`       | Optional absolute path for structured logs. When omitted, logs go to `logs/rusty-mem.log`.           | `/Users/you/rusty-mem.log`        |
+| `RUST_LOG`                 | Standard Rust logging filter if you need more or less verbosity.                                     | `rusty_mem=debug,tower_http=info` |
 
 ### Switching to hosted providers
 
-If you prefer OpenAI or another hosted provider, update the environment variables accordingly:
+If you prefer OpenAI or another hosted provider, update the environment variables accordingly. Note: the current build uses a deterministic embedding implementation and does not call external APIs; provider settings are recorded for logging and future provider integrations.
 
 ```env
 EMBEDDING_PROVIDER=openai
@@ -31,7 +30,7 @@ EMBEDDING_DIMENSION=1536
 OPENAI_API_KEY=sk-...
 ```
 
-Rusty Memory reads provider-specific credentials directly from the environment, so no code changes are required.
+Provider-specific credentials are read from the environment, so no code changes will be required when remote providers are enabled.
 
 ## MCP configuration templates
 
@@ -41,9 +40,8 @@ Most agent platforms accept either TOML (Codex CLI style) or JSON (Kilo, Cline, 
 
 ```toml
 [mcp_servers.rusty_mem]
-command = "/Users/you/code/rusty-mcp/target/release/rusty_mem_mcp"
+command = "rusty_mem_mcp" # use full path if not on PATH
 args = []
-cwd = "/Users/you/code/rusty-mcp"
 transport = "stdio"
 
   [mcp_servers.rusty_mem.env]
@@ -52,17 +50,15 @@ transport = "stdio"
   EMBEDDING_PROVIDER = "ollama"
   EMBEDDING_MODEL = "nomic-embed-text"
   EMBEDDING_DIMENSION = "768"
-  OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
 ```
 
 `TEXT_SPLITTER_CHUNK_SIZE` is optional—omit it unless you need a specific chunk size.
 
 **Step-by-step for new users**
 
-1. Build the release binary once with `cargo build --release --bin rusty_mem_mcp`.
-2. Copy the snippet above into your Codex `config.toml`.
-3. Replace the `/Users/you/...` paths with the actual location of your checkout.
-4. Save the file and restart Codex; the MCP server appears in the server list.
+1. Install: `cargo install rustymcp`.
+2. Ensure `~/.cargo/bin` is on your PATH (or use the full binary path in `command`).
+3. Copy the snippet above into your Codex `config.toml` and restart Codex.
 
 ### JSON example (Kilo Code, Cline, Roo Code)
 
@@ -70,20 +66,18 @@ transport = "stdio"
 {
   "mcpServers": {
     "rusty": {
-      "command": "/Users/you/code/rusty-mcp/target/release/rusty_mem_mcp",
+      "command": "rusty_mem_mcp",
       "args": [],
-      "cwd": "/Users/you/code/rusty-mcp",
       "transport": "stdio",
       "env": {
         "QDRANT_URL": "http://127.0.0.1:6333",
         "QDRANT_COLLECTION_NAME": "rusty-mem",
         "EMBEDDING_PROVIDER": "ollama",
         "EMBEDDING_MODEL": "nomic-embed-text",
-        "EMBEDDING_DIMENSION": "768",
-        "OLLAMA_ENDPOINT": "http://127.0.0.1:11434"
+        "EMBEDDING_DIMENSION": "768"
       }
     }
-}
+  }
 }
 ```
 
@@ -91,15 +85,14 @@ As with the TOML example, only add `TEXT_SPLITTER_CHUNK_SIZE` if you want to ove
 
 **Step-by-step for new users**
 
-1. Ensure the binary path and working directory are correct for your machine.
-2. If you are running on Windows, remember to escape backslashes (`"C:\\Users\\you\\code"`).
-3. Paste the configuration into the MCP section of your editor.
-4. Reload the agent; the server should appear immediately.
+1. Install: `cargo install rustymcp` and ensure the binary is on PATH.
+2. Paste the configuration into the MCP section of your editor and reload it.
+3. On Windows, escape backslashes if you use a full path to the binary.
 
 ### Tips for first-time users
 
 - If the agent says it cannot reach Qdrant, check that the `QDRANT_URL` host/port are accessible from the agent machine.
-- Ollama must have the requested model pulled (`ollama pull nomic-embed-text`). The server logs a clear error if the model is missing.
+- Provider settings are recorded for logging in the current build; when remote providers are enabled, ensure credentials and models are available.
 - To disable file logging during experiments, set `RUSTY_MEM_LOG_FILE=/dev/null` before launching the binary.
 
 ## Verifying your setup

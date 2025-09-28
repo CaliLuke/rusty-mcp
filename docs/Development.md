@@ -1,4 +1,4 @@
-# Quality Manual
+# Development Guide
 
 This guide describes the tooling, automation, and expectations for working in the Rusty Memory repository.
 

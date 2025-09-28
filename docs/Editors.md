@@ -16,7 +16,7 @@ Claude Desktop reads MCP servers from `~/.claude/claude_desktop_config.json`.
 {
   "mcpServers": {
     "rusty_mem": {
-      "command": "/Users/you/.cargo/bin/rusty_mem_mcp",
+      "command": "rusty_mem_mcp",
       "args": [],
       "env": {
         "QDRANT_URL": "http://127.0.0.1:6333",
@@ -33,7 +33,7 @@ Claude Desktop reads MCP servers from `~/.claude/claude_desktop_config.json`.
 Notes:
 
 - Claude launches MCP servers as child processes using stdio transport.
-- Adjust paths and model settings to your environment.
+- If the binary is not on PATH, set `command` to the full path (e.g., `/Users/you/.cargo/bin/rusty_mem_mcp`).
 
 ## Codex CLI
 
@@ -41,9 +41,8 @@ Add the server to your `config.toml`:
 
 ```toml
 [mcp_servers.rusty_mem]
-command = "/Users/you/.cargo/bin/rusty_mem_mcp"
+command = "rusty_mem_mcp" # use full path if not on PATH
 args = []
-cwd = "/Users/you/code/rusty-mcp"
 transport = "stdio"
 
   [mcp_servers.rusty_mem.env]
@@ -62,9 +61,8 @@ Most JSON-based clients share a compatible `mcpServers` shape. Use this as a sta
 {
   "mcpServers": {
     "rusty_mem": {
-      "command": "/Users/you/.cargo/bin/rusty_mem_mcp",
+      "command": "rusty_mem_mcp",
       "args": [],
-      "cwd": "/Users/you/code/rusty-mcp",
       "transport": "stdio",
       "env": {
         "QDRANT_URL": "http://127.0.0.1:6333",
@@ -82,5 +80,5 @@ Most JSON-based clients share a compatible `mcpServers` shape. Use this as a sta
 
 - Ensure `~/.cargo/bin` is on your `PATH` if your editor resolves commands via PATH.
 - On Windows, escape backslashes in JSON paths (e.g. `"C:\\Users\\you\\.cargo\\bin\\rusty_mem_mcp.exe"`).
-- If your editor supports per-project configuration, set `cwd` to the repository you want indexed.
+- If your editor requires a working directory, you can set `cwd` to any folder (not required for Rusty Memory to operate).
 - The server exits if required environment variables are missing; check logs or the editor’s MCP console.

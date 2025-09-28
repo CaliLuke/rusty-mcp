@@ -5,68 +5,56 @@
 [![CI](https://github.com/CaliLuke/rusty-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/CaliLuke/rusty-mcp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue?style=flat-square)](LICENSE)
 
-Rusty Memory MCP (crate: `rustymcp`) is a compact memory server for agents:
+Rusty Memory MCP is a no‑fuss memory server for coding agents. It chunks text, generates embeddings, and stores vectors in Qdrant. You can run it as:
 
-- Splits text into semantic chunks with model‑aware token budgets.
-- Generates embeddings and stores vectors in Qdrant.
-- Exposes both an HTTP API and an MCP stdio server.
+- An MCP server over stdio for editors/agents
+- A local HTTP service for simple scripts
 
-See internals and architecture in docs/Design.md.
+If you want to hack on the codebase or learn how it works internally, jump to Developer Docs below.
 
-## Quick start
+## Quick Start (MCP in your editor)
 
-4. **Install the CLI (recommended)**
-   Skip local builds by installing the published binary:
+1. Install the binaries
 
    ```bash
    cargo install rustymcp
    ```
 
-   This places three executables in `~/.cargo/bin`:
-   - `rustymcp` → HTTP server entrypoint
-   - `rusty_mem_mcp` → MCP stdio server
-   - `metrics-post` → helper used by the metrics script
+   This installs:
+   - `rusty_mem_mcp` (MCP server)
+   - `rustymcp` (HTTP server)
+   - `metrics-post` (helper used by scripts)
 
-5. **Run the MCP server**
-
-   ```bash
-   cargo run --bin rusty_mem_mcp
-   ```
-
-   or, if you installed the crate, launch it directly:
+2. Start Qdrant (vector database)
 
    ```bash
-   ~/.cargo/bin/rusty_mem_mcp
+   docker run --pull=always -p 6333:6333 qdrant/qdrant:latest
    ```
 
-   Building from source once also works:
+3. Configure environment
+
+   Copy `.env.example` to `.env` and edit values, or provide the same variables via your MCP client config:
+
+   Required variables:
+   - `QDRANT_URL` (e.g. `http://127.0.0.1:6333`)
+   - `QDRANT_COLLECTION_NAME` (e.g. `rusty-mem`)
+   - `EMBEDDING_PROVIDER` (`ollama` or `openai` — used for logging today)
+   - `EMBEDDING_MODEL` (free‑form, e.g. `nomic-embed-text`)
+   - `EMBEDDING_DIMENSION` (must match your model, e.g. `768`)
+
+4. Launch the MCP server
 
    ```bash
-   cargo build --release --bin rusty_mem_mcp
-   ./target/release/rusty_mem_mcp
+   rusty_mem_mcp
    ```
 
-6. **Run the HTTP server** (optional if you only need MCP)
+5. Add to your agent
 
-```bash
-cargo run
-```
-
-The server listens on `SERVER_PORT` when that variable is set; otherwise it scans `4100-4199` and binds the first available port. Successful `POST /index` calls return `{ "chunks_indexed": <count>, "chunk_size": <tokens> }` so callers can observe the automatic budget.
-
-or, using the installed binary:
-
-```bash
-~/.cargo/bin/rustymcp
-```
-
-7. **Point your agent at the server**
-   - Codex CLI (TOML):
-
+   - Codex CLI (`~/.codex/config.toml`):
      ```toml
      [mcp_servers.rusty_mem]
-     command = "/full/path/to/target/release/rusty_mem_mcp"
-     cwd = "/full/path/to/rusty-mcp"
+     command = "rusty_mem_mcp" # or use the full path to the binary
+     args = []
      transport = "stdio"
 
        [mcp_servers.rusty_mem.env]
@@ -75,63 +63,69 @@ or, using the installed binary:
        EMBEDDING_PROVIDER = "ollama"
        EMBEDDING_MODEL = "nomic-embed-text"
        EMBEDDING_DIMENSION = "768"
-       OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
      ```
 
-   - JSON-based clients (Kilo, Cline, Roo Code):
-
+   - JSON clients (Kilo, Cline, Roo Code):
      ```json
      {
        "mcpServers": {
          "rusty": {
-           "command": "/full/path/to/target/release/rusty_mem_mcp",
+           "command": "rusty_mem_mcp",
            "args": [],
-           "cwd": "/full/path/to/rusty-mcp",
            "transport": "stdio",
            "env": {
              "QDRANT_URL": "http://127.0.0.1:6333",
              "QDRANT_COLLECTION_NAME": "rusty-mem",
              "EMBEDDING_PROVIDER": "ollama",
              "EMBEDDING_MODEL": "nomic-embed-text",
-             "EMBEDDING_DIMENSION": "768",
-             "OLLAMA_ENDPOINT": "http://127.0.0.1:11434"
+             "EMBEDDING_DIMENSION": "768"
            }
          }
        }
      }
      ```
 
-   `TEXT_SPLITTER_CHUNK_SIZE` is now optional; the server infers a sensible value from the embedding model when the variable is omitted.
+6. Try it
 
-8. **Use the built-in tools**
-   - `get-collections` → list available Qdrant collections (`{}` payload).
-   - `new-collection` → create or resize (`{ "name": "docs", "vector_size": 768 }`).
-   - `push` → ingest (`{ "text": "my note", "collection": "docs" }`). The response echoes `chunksIndexed` and the effective `chunkSize`.
-   - `metrics` → check `{ "documentsIndexed": …, "chunksIndexed": … }`.
-     When documents have been ingested, the payload also includes `lastChunkSize`.
+   From your agent, use:
+   - `get-collections` → list Qdrant collections
+   - `new-collection` → create or resize a collection
+   - `push` → index text into a collection
+   - `metrics` → view counters (`documentsIndexed`, `chunksIndexed`, `lastChunkSize`)
 
-## HTTP API quick reference
+## Optional: Run the HTTP server
 
-Endpoints (all return JSON on success unless noted):
+If you prefer HTTP, set the same environment and run:
 
-- `POST /index` – Index a document into the default or provided collection.
-  - Request: `{ "text": string, "collection"?: string }`
-  - Response: `{ "chunks_indexed": number, "chunk_size": number }`
-- `GET /collections` – List Qdrant collections.
-- `POST /collections` – Create or resize a collection.
-  - Request: `{ "name": string, "vector_size"?: number }`
-- `GET /metrics` – Read counters: `{ "documents_indexed": number, "chunks_indexed": number, "last_chunk_size"?: number }`
+```bash
+rustymcp
+```
 
-## Configuration
+By default the server binds the first free port in `4100–4199` (or `SERVER_PORT` if set). Example:
 
-Most deployments only set: `QDRANT_URL`, `QDRANT_COLLECTION_NAME`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, and `EMBEDDING_DIMENSION`. See the full reference in [docs/Configuration.md](docs/Configuration.md).
+```bash
+curl -sS -X POST http://127.0.0.1:4100/index \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"hello from http"}'
+```
+
+Returns `{ "chunks_indexed": <number>, "chunk_size": <number> }` on success.
+
+Having trouble? See `docs/Troubleshooting.md`.
+
+## Developer Docs
+
+If you want to extend Rusty Memory or understand the architecture:
+
+- Configuration reference and client snippets: `docs/Configuration.md`
+- Architecture and module overview: `docs/Design.md`
+- Editor integration examples: `docs/Editors.md`
+- Development guide (style, tests, scripts): `docs/Development.md`
 
 ## License
 
-This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). It is free for noncommercial use. Commercial use is not permitted by this license.
+Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). Free for non‑commercial use.
 
-## Contributing
+## Support
 
-Contributions are welcome via pull requests. Please review the [Quality Manual](docs/QUALITY_MANUAL.md) for code style, testing, and automation expectations.
-
-- Editor integrations (Claude, Codex CLI, Kilo, Cline, Roo Code) live in [docs/Editors.md](docs/Editors.md) to keep this README focused.
+Issues and PRs are welcome. If anything in the Quick Start is unclear, please open an issue so we can make onboarding even smoother.

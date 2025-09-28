@@ -6,7 +6,7 @@
 - `src/bin/metrics_post.rs` exposes the metrics ingestion helper binary.
 - `docs/` captures product notes and engineering references.
 - `scripts/` contains reusable automation such as formatting and metrics hooks; generated artifacts are written into `reports/`.
-- `docs/QUALITY_MANUAL.md` (process and quality gates) and `docs/Configuration.md` (environment guide) are the primary references when onboarding changes.
+- `docs/Development.md` (process and quality gates) and `docs/Configuration.md` (environment guide) are the primary references when onboarding changes.
 
 ## Build, Test, and Development Commands
 
@@ -16,6 +16,13 @@
 - `cargo test` exercises unit and integration tests; pass `-- --nocapture` to inspect stdout.
 - `./scripts/verify.sh` batches `fmt`, `clippy`, doc builds, and tests (accepts subcommands like `fmt` or `test`).
 - `./scripts/metrics.sh` refreshes coverage, complexity, and dependency reports under `reports/`.
+
+## CI checks via GitHub MCP
+
+- To check the latest CI run quickly, use the GitHub MCP:
+  - List latest runs for the workflow: `list_workflow_runs(owner: "CaliLuke", repo: "rusty-mcp", workflow_id: "ci.yml", perPage: 1)`
+  - Get job statuses for that run: `list_workflow_jobs(owner: "CaliLuke", repo: "rusty-mcp", run_id: <from previous>)`
+  - If needed, fetch just failed job logs: `get_job_logs(owner: "CaliLuke", repo: "rusty-mcp", run_id: <id>, failed_only: true, return_content: true)`
 
 ## Coding Style & Naming Conventions
 

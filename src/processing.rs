@@ -11,6 +11,8 @@ use tiktoken_rs::{
     p50k_edit, r50k_base,
 };
 
+type TokenCounter = Box<dyn Fn(&str) -> usize>;
+
 /// Errors produced while turning raw text into semantic chunks.
 #[derive(Debug, Error)]
 pub enum ChunkingError {
@@ -288,7 +290,7 @@ fn chunk_text(
 fn build_token_counter(
     provider: EmbeddingProvider,
     model: &str,
-) -> Result<Box<dyn Fn(&str) -> usize>, ChunkingError> {
+) -> Result<TokenCounter, ChunkingError> {
     match provider {
         EmbeddingProvider::OpenAI => build_tiktoken_counter(model),
         EmbeddingProvider::Ollama => match build_tiktoken_counter(model) {
@@ -305,7 +307,7 @@ fn build_token_counter(
     }
 }
 
-fn build_tiktoken_counter(model: &str) -> Result<Box<dyn Fn(&str) -> usize>, ChunkingError> {
+fn build_tiktoken_counter(model: &str) -> Result<TokenCounter, ChunkingError> {
     let normalized = model.trim();
     let target = if normalized.is_empty() {
         "cl100k_base"
@@ -352,7 +354,7 @@ fn encoding_from_name(name: &str) -> Option<Result<CoreBPE, TokenizerError>> {
     }
 }
 
-fn default_token_counter() -> Box<dyn Fn(&str) -> usize> {
+fn default_token_counter() -> TokenCounter {
     Box::new(|segment: &str| {
         let tokens = segment.split_whitespace().count();
         if tokens == 0 && !segment.is_empty() {
@@ -366,7 +368,7 @@ fn default_token_counter() -> Box<dyn Fn(&str) -> usize> {
 fn chunk_text_with_counter(
     text: &str,
     chunk_size: usize,
-    token_counter: Box<dyn Fn(&str) -> usize>,
+    token_counter: TokenCounter,
 ) -> Vec<String> {
     // semchunk handles the semantic splitting; feeding it the model-aware counter keeps
     // the chunk boundaries educationally relevant for retrieval demos.
