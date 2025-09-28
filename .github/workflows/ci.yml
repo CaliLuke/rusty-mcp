@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      CARGO_HUSKY_DONT_INSTALL_HOOKS: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
