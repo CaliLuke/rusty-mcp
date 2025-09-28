@@ -89,6 +89,49 @@ Key modules to evolve are listed with concrete responsibilities.
 - `tags` → contains‑any or contains‑all (start with contains‑any for simplicity).
 - `time_range` → `timestamp` range (`start`, `end`) when supplied.
 
+## Local Stack (Qdrant & Ollama)
+
+Baseline assumptions for all milestones:
+- Qdrant is already running locally and kept always‑on at `http://127.0.0.1:6333` (persistent storage). Do not include container start steps in milestone notes; only validate connectivity.
+- Ollama may be used for live embeddings when `EMBEDDING_PROVIDER=ollama`; start it only if not already running.
+
+Quick validations (use these before testing):
+- Qdrant: `curl -s http://127.0.0.1:6333/collections | jq .`
+- Ollama: `curl -s http://127.0.0.1:11434/api/tags | jq '.models[].name'`
+
+- If bootstrapping a new machine: Qdrant via Docker (recommended)
+  - One‑liner (ephemeral storage):
+    - `docker run --pull=always -p 6333:6333 qdrant/qdrant:latest`
+  - With persistent storage:
+    - `docker volume create qdrant_storage`
+    - `docker run --pull=always -p 6333:6333 -v qdrant_storage:/qdrant/storage qdrant/qdrant:latest`
+  - Health/sanity checks:
+    - `curl -s http://127.0.0.1:6333/collections | jq .` (should return a JSON object)
+  - Env expected by the server:
+    - `QDRANT_URL=http://127.0.0.1:6333`
+
+- Ollama (for real embeddings; optional for unit tests but required for live checks when `EMBEDDING_PROVIDER=ollama`)
+  - Install/start: `ollama serve` (macOS: `brew install ollama`), default URL `http://127.0.0.1:11434`.
+  - Pull an embedding model (example): `ollama pull nomic-embed-text`
+  - Health/sanity checks:
+    - `curl -s http://127.0.0.1:11434/api/tags | jq '.models[].name'`
+  - Env expected by the server:
+    - `EMBEDDING_PROVIDER=ollama`
+    - `EMBEDDING_MODEL=<your-embedding-model>` (e.g., `nomic-embed-text`)
+    - `EMBEDDING_DIMENSION=<matching-dimension>` (must match your model; see the model card)
+    - `OLLAMA_URL=http://127.0.0.1:11434` (optional; defaults to this value)
+  - Notes
+    - If the model’s dimension does not match `EMBEDDING_DIMENSION`, ingestion/search will error with a helpful message. Adjust the env to match the model.
+
+- Project env quickstart
+  - Copy defaults: `cp .env.example .env` and tweak as needed (especially `EMBEDDING_MODEL` and `EMBEDDING_DIMENSION`).
+  - Start MCP server: `cargo run --bin rusty_mem_mcp` (reads `.env`).
+  - Start HTTP server (if needed): `cargo run` (port from `SERVER_PORT` or 4100–4199 scanner).
+
+- Troubleshooting
+  - Qdrant not reachable: confirm container runs; `curl -s http://127.0.0.1:6333/collections` should succeed.
+  - Ollama model missing/dimension mismatch: run `ollama pull <model>` and ensure `EMBEDDING_DIMENSION` matches; restart the server.
+
 ## 4) Staged Plan with Gates, Tests, and Git Workflow
 
 Each milestone lists tasks, acceptance criteria, how to test, expected results, and git steps.
@@ -110,25 +153,7 @@ Each milestone lists tasks, acceptance criteria, how to test, expected results, 
 
 ### M4 – MCP Resources (Memory Types, Health)
 
-- Tasks
-  - Enable MCP resources capability.
-  - Add read‑only resources:
-    - `mcp://rusty-mem/memory-types`
-    - `mcp://rusty-mem/health`
-  - Document in server instructions and README.
-
-- Acceptance Criteria
-  - `listResources` shows both resources with correct MIME and URIs.
-  - `readResource` returns valid JSON with required fields.
-
-- How to Test
-  - Use MCP host to list and read resources; verify health content reflects live configuration (embedding provider/model and Qdrant reachability).
-
-- Expected Results
-  - Agents can preflight server status and discover supported memory types without calling tools.
-
-- Git Steps
-  - Commit message: `Add MCP resources: memory-types and health`
+✅ Completed. The MCP server now advertises the resources capability and returns `mcp://rusty-mem/memory-types` and `mcp://rusty-mem/health` via `listResources`, each served as JSON text when fetched through `readResource`. The memory-types snapshot enumerates the allowed values and default, while the health payload reports the live embedding configuration plus a Qdrant reachability probe (including default-collection presence and any error message). Host instructions and the README walk agents through `listResources`/`readResource`, and unit tests cover the resource serializers. Live validation: `cargo test --test live_validation -- --ignored --nocapture` (requires Qdrant at `http://127.0.0.1:6333` and Ollama at `http://127.0.0.1:11434`).
 
 ### M5 – MCP Resources (Projects and Tags)
 

@@ -95,6 +95,7 @@ If you want to hack on the codebase or learn how it works internally, jump to De
 
    From your agent, use:
    - `get-collections` → list Qdrant collections
+   - `listResources` → discover read-only resources; use `readResource` on `mcp://rusty-mem/memory-types` and `mcp://rusty-mem/health` for metadata/health snapshots
    - `new-collection` → create or resize a collection
    - `push` (alias: `index`) → index text with optional metadata (`project_id`, `memory_type`, `tags`, `source_uri`)
    - `metrics` → view counters (`documentsIndexed`, `chunksIndexed`, `lastChunkSize`)

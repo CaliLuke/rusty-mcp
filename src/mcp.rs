@@ -1,26 +1,30 @@
 use std::{borrow::Cow, sync::Arc};
 
 use crate::{
-    config::get_config,
-    processing::{IngestMetadata, ProcessingService},
+    config::{EmbeddingProvider, get_config},
+    processing::{IngestMetadata, ProcessingService, QdrantHealthSnapshot},
 };
 use rmcp::{
     ErrorData as McpError,
     handler::server::ServerHandler,
     model::{
-        CallToolRequestParam, CallToolResult, JsonObject, ListToolsResult, ServerCapabilities,
-        ServerInfo, Tool, ToolAnnotations,
+        AnnotateAble, CallToolRequestParam, CallToolResult, JsonObject, ListResourcesResult,
+        ListToolsResult, RawResource, ReadResourceRequestParam, ReadResourceResult, Resource,
+        ResourceContents, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
     },
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 /// MCP server implementation exposing Rusty Memory operations.
 #[derive(Clone)]
 pub struct RustyMemMcpServer {
     processing: Arc<ProcessingService>,
 }
+
+const MEMORY_TYPES_URI: &str = "mcp://rusty-mem/memory-types";
+const HEALTH_URI: &str = "mcp://rusty-mem/health";
 
 impl RustyMemMcpServer {
     /// Create a new MCP server using the supplied processing pipeline.
@@ -113,6 +117,19 @@ impl RustyMemMcpServer {
             },
         ]
     }
+
+    fn describe_resources(&self) -> Vec<Resource> {
+        let mut memory_types = RawResource::new(MEMORY_TYPES_URI, "memory-types");
+        memory_types.description =
+            Some("Supported memory_type values and default selection".into());
+        memory_types.mime_type = Some("text".into());
+
+        let mut health = RawResource::new(HEALTH_URI, "health");
+        health.description = Some("Live embedding configuration and Qdrant reachability".into());
+        health.mime_type = Some("text".into());
+
+        vec![memory_types.no_annotation(), health.no_annotation()]
+    }
 }
 
 impl ServerHandler for RustyMemMcpServer {
@@ -123,13 +140,25 @@ impl ServerHandler for RustyMemMcpServer {
         implementation.version = env!("CARGO_PKG_VERSION").to_string();
 
         ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_resources()
+                .enable_tools()
+                .build(),
             server_info: implementation,
             instructions: Some(
-                "Rusty Memory MCP usage:\n1. Call get-collections to discover existing Qdrant collections (pass {}).\n2. To create or update a collection, call new-collection with { \"name\": <collection>, \"vector_size\": <optional dimension> }.\n3. Push content with push (or index) using { \"text\": <document>, \"collection\": <optional override>, \"project_id\": \"default\" (optional), \"memory_type\": \"semantic\" (optional), \"tags\": [<strings>], \"source_uri\": <string> }. Responses include `chunksIndexed`, `chunkSize`, `inserted`, `updated`, and `skippedDuplicates`.\n4. Inspect ingestion counters via metrics (pass {}) to confirm documents were processed; the result echoes `lastChunkSize`.\nAll tool responses return structured JSON; prefer the structured payload over the text summary.".into(),
+                "Rusty Memory MCP usage:\n1. Call listResources({}) to discover read-only resources, then readResource each URI (e.g., mcp://rusty-mem/memory-types, mcp://rusty-mem/health) for supported metadata and health snapshots.\n2. Call get-collections to discover existing Qdrant collections (pass {}).\n3. To create or update a collection, call new-collection with { \"name\": <collection>, \"vector_size\": <optional dimension> }.\n4. Push content with push (or index) using { \"text\": <document>, \"collection\": <optional override>, \"project_id\": \"default\" (optional), \"memory_type\": \"semantic\" (optional), \"tags\": [<strings>], \"source_uri\": <string> }. Responses include `chunksIndexed`, `chunkSize`, `inserted`, `updated`, and `skippedDuplicates`.\n5. Inspect ingestion counters via metrics (pass {}) to confirm documents were processed; the result echoes `lastChunkSize`.\nAll tool responses return structured JSON; prefer the structured payload over the text summary.".into(),
             ),
             ..ServerInfo::default()
         }
+    }
+
+    fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParam>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
+        let resources = self.describe_resources();
+        std::future::ready(Ok(ListResourcesResult::with_all_items(resources)))
     }
 
     fn list_tools(
@@ -139,6 +168,45 @@ impl ServerHandler for RustyMemMcpServer {
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         let tools = self.describe_tools();
         std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
+    }
+
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParam,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
+        let processing = self.processing.clone();
+        async move {
+            match request.uri.as_str() {
+                MEMORY_TYPES_URI => Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(
+                        memory_types_payload(),
+                        MEMORY_TYPES_URI,
+                    )],
+                }),
+                HEALTH_URI => {
+                    let config = get_config();
+                    let snapshot = processing.qdrant_health().await;
+                    Ok(ReadResourceResult {
+                        contents: vec![ResourceContents::text(
+                            health_payload(
+                                config.embedding_provider,
+                                &config.embedding_model,
+                                config.embedding_dimension,
+                                &config.qdrant_url,
+                                &config.qdrant_collection_name,
+                                &snapshot,
+                            ),
+                            HEALTH_URI,
+                        )],
+                    })
+                }
+                other => Err(McpError::invalid_params(
+                    format!("Unknown resource URI: {other}"),
+                    None,
+                )),
+            }
+        }
     }
 
     fn call_tool(
@@ -258,6 +326,59 @@ fn parse_arguments<T: DeserializeOwned>(arguments: Option<JsonObject>) -> Result
         .map_err(|err| McpError::invalid_params(format!("Invalid arguments: {err}"), None))
 }
 
+fn memory_types_payload() -> String {
+    serde_json::to_string_pretty(&json!({
+        "memory_types": ["episodic", "semantic", "procedural"],
+        "default": "semantic"
+    }))
+    .unwrap_or_else(|_| {
+        "{\"memory_types\":[\"episodic\",\"semantic\",\"procedural\"],\"default\":\"semantic\"}"
+            .into()
+    })
+}
+
+fn health_payload(
+    provider: EmbeddingProvider,
+    model: &str,
+    dimension: usize,
+    qdrant_url: &str,
+    default_collection: &str,
+    snapshot: &QdrantHealthSnapshot,
+) -> String {
+    let mut qdrant = Map::new();
+    qdrant.insert("url".into(), Value::String(qdrant_url.to_string()));
+    qdrant.insert("reachable".into(), Value::Bool(snapshot.reachable));
+    qdrant.insert(
+        "defaultCollection".into(),
+        Value::String(default_collection.to_string()),
+    );
+    qdrant.insert(
+        "defaultCollectionPresent".into(),
+        Value::Bool(snapshot.default_collection_present),
+    );
+    if let Some(error) = snapshot.error.as_ref() {
+        qdrant.insert("error".into(), Value::String(error.clone()));
+    }
+
+    let payload = json!({
+        "embedding": {
+            "provider": embedding_provider_label(provider),
+            "model": model,
+            "dimension": dimension,
+        },
+        "qdrant": Value::Object(qdrant),
+    });
+
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string())
+}
+
+fn embedding_provider_label(provider: EmbeddingProvider) -> &'static str {
+    match provider {
+        EmbeddingProvider::Ollama => "ollama",
+        EmbeddingProvider::OpenAI => "openai",
+    }
+}
+
 fn index_input_schema() -> JsonObject {
     let mut properties = JsonObject::new();
     properties.insert("text".into(), string_schema("Document contents to index"));
@@ -360,4 +481,46 @@ fn finalize_object_schema(properties: JsonObject, required: &[&str]) -> JsonObje
     }
     schema.insert("additionalProperties".into(), Value::Bool(false));
     schema
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn memory_types_payload_is_valid_json() {
+        let body = memory_types_payload();
+        let value: Value =
+            serde_json::from_str(&body).expect("memory-types payload must be valid JSON");
+        assert_eq!(value["default"], "semantic");
+        let memory_types = value["memory_types"]
+            .as_array()
+            .expect("memory_types array");
+        assert_eq!(memory_types.len(), 3);
+    }
+
+    #[test]
+    fn health_payload_captures_qdrant_status() {
+        let snapshot = QdrantHealthSnapshot {
+            reachable: false,
+            default_collection_present: false,
+            error: Some("connection refused".into()),
+        };
+
+        let body = health_payload(
+            EmbeddingProvider::Ollama,
+            "nomic-embed-text",
+            768,
+            "http://127.0.0.1:6333",
+            "rusty-mem",
+            &snapshot,
+        );
+
+        let value: Value = serde_json::from_str(&body).expect("health payload must be valid JSON");
+        assert_eq!(value["embedding"]["provider"], "ollama");
+        assert_eq!(value["embedding"]["dimension"], 768);
+        assert_eq!(value["qdrant"]["reachable"], false);
+        assert_eq!(value["qdrant"]["error"], "connection refused");
+    }
 }

@@ -76,6 +76,17 @@ pub struct ProcessingOutcome {
     pub skipped_duplicates: usize,
 }
 
+/// Reachability and readiness snapshot for Qdrant.
+#[derive(Debug, Clone)]
+pub struct QdrantHealthSnapshot {
+    /// Indicates whether the Qdrant HTTP endpoint responded successfully.
+    pub reachable: bool,
+    /// Whether the configured default collection is currently present.
+    pub default_collection_present: bool,
+    /// Optional diagnostic string captured when Qdrant is unreachable.
+    pub error: Option<String>,
+}
+
 impl ProcessingService {
     /// Build a new processing service, initializing backing services as needed.
     ///
@@ -254,6 +265,31 @@ impl ProcessingService {
     /// Callers can expose the snapshot through diagnostics endpoints or dashboards.
     pub fn metrics_snapshot(&self) -> MetricsSnapshot {
         self.metrics.snapshot()
+    }
+
+    /// Probe Qdrant to surface a lightweight health snapshot for MCP resources.
+    pub async fn qdrant_health(&self) -> QdrantHealthSnapshot {
+        let config = get_config();
+        match self.qdrant_service.list_collections().await {
+            Ok(collections) => {
+                let default_present = collections
+                    .iter()
+                    .any(|name| name == &config.qdrant_collection_name);
+                QdrantHealthSnapshot {
+                    reachable: true,
+                    default_collection_present: default_present,
+                    error: None,
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Qdrant health probe failed");
+                QdrantHealthSnapshot {
+                    reachable: false,
+                    default_collection_present: false,
+                    error: Some(error.to_string()),
+                }
+            }
+        }
     }
 }
 
