@@ -20,3 +20,4 @@ reports/
 .cargo-husky/
 tmp/
 .DS_Store
+research-for-roadmap.md

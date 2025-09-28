@@ -1,5 +1,10 @@
 # Rusty Memory MCP
 
+[![Crates.io](https://img.shields.io/crates/v/rustymcp.svg?style=flat-square)](https://crates.io/crates/rustymcp)
+[![docs.rs](https://docs.rs/rustymcp/badge.svg)](https://docs.rs/rustymcp)
+[![CI](https://github.com/CaliLuke/rusty-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/CaliLuke/rusty-mcp/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue?style=flat-square)](LICENSE)
+
 Rusty Memory MCP (crate: `rustymcp`) is a compact memory server for agents. It provides:
 
 - Semantic chunking using `semchunk-rs` with OpenAI‑compatible token counting (`tiktoken-rs`).
@@ -175,37 +180,4 @@ This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENS
 
 Contributions are welcome via pull requests. Please review the [Quality Manual](docs/QUALITY_MANUAL.md) for code style, testing, and automation expectations.
 
-## Configuration reference
-
-A detailed explanation of every environment variable, along with agent configuration samples, lives in [docs/configuration.md](docs/configuration.md). It covers:
-
-- All Qdrant and embedding settings.
-- Ollama tips for local-only setups.
-- JSON vs. TOML MCP snippets for popular tools.
-- Log routing and optional overrides.
-
-## HTTP API overview
-
-| Method & Path       | Description                             | Notes                                                                    |
-| ------------------- | --------------------------------------- | ------------------------------------------------------------------------ |
-| `POST /index`       | Index a document.                       | `text` is required; `collection` falls back to `QDRANT_COLLECTION_NAME`. |
-| `GET /collections`  | List Qdrant collections.                | Returns `{ "collections": [string] }`.                                   |
-| `POST /collections` | Create or resize a collection.          | Accepts `name` and optional `vector_size`.                               |
-| `GET /metrics`      | Inspect ingestion counters.             | Returns document and chunk totals.                                       |
-| `GET /commands`     | Machine-readable catalog for MCP hosts. | Lists HTTP commands with sample payloads.                                |
-
-## Development workflow
-
-- Follow the [Engineering Guide](docs/QUALITY_MANUAL.md) for hooks, metrics, and code-quality expectations.
-- `./scripts/verify.sh` runs fmt, clippy, tests, and docs.
-- `./scripts/metrics.sh` provides optional coverage, complexity, and dependency reports.
-- `prek run --all-files` (or `pre-commit run --all-files`) mirrors the commit-time guardrails.
-
-## Roadmap
-
-1. Swap the deterministic embedding stub for provider-backed embeddings via `ai-lib`.
-2. Add semantic chunking heuristics to reduce single-chunk documents.
-3. Expose a search endpoint and matching MCP tool for similarity queries.
-4. Offer Prometheus metrics and richer MCP notifications for observability.
-
-Rusty Memory aims to stay approachable while giving you the building blocks for reliable agent memory. If you have ideas or discover pain points, open an issue—we want the tool to stay delightful for newcomers and power users alike.
+- Editor integrations (Claude, Codex CLI, Kilo, Cline, Roo Code) live in [docs/Editors.md](docs/Editors.md) to keep this README focused.
