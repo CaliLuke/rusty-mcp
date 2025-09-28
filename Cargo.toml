@@ -1,6 +1,6 @@
 [package]
 name = "rustymcp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 default-run = "rustymcp"
 description = "Rusty Memory is a no-fuss memory server for coding agents."
