@@ -1,13 +1,11 @@
-# Rusty Memory
+# Rusty Memory MCP
 
-Rusty Memory is a no-fuss memory server for coding agents. We built it after struggling with tools that required complex orchestration, expensive API keys, or weeks of tweaking before you could store a single note. The goal is simple: give hobbyists and developers a drop-in memory stack that works out of the box, keeps costs grounded by treating Ollama as a first-class embedding provider, and stays friendly to anyone just getting started with agentic coding.
+Rusty Memory MCP (crate: `rustymcp`) is a compact memory server for agents. It provides:
 
-## Why this project exists
-
-- **Zero drama setup.** The entire stack is a single Rust binary plus Qdrant. Point your agent at the MCP server or the HTTP API and you can start pushing documents immediately.
-- **Local-first embeddings.** Ollama is the default. If you have no cloud keys, you still get embeddings, vector storage, and full agent memory without spending a cent. When you do want hosted models, switch the environment variables and keep rolling.
-- **Intentional minimalism.** Every module maps to a single concern—configuration, chunking, embedding, indexing, metrics—so it’s easy to reason about and extend.
-- **Friendly automation.** Documentation coverage is enforced, hooks run quickly, and the metrics script offers optional deep dives without getting in your way.
+- Semantic chunking using `semchunk-rs` with OpenAI‑compatible token counting (`tiktoken-rs`).
+- Automatic, model‑aware chunk sizing (overridable when needed).
+- Embedding generation via pluggable providers (local by default), with vectors stored in Qdrant.
+- Two surfaces: a simple HTTP API and a Model Context Protocol (MCP) stdio server.
 
 ## How it works
 
@@ -44,10 +42,10 @@ graph TD
 ```
 
 1. Clients call either the HTTP API or the MCP tool set.
-2. `ProcessingService` picks a model-aware token budget (override with `TEXT_SPLITTER_CHUNK_SIZE` only when you need to fine-tune it).
-3. The embedding client produces deterministic vectors (Ollama by default; other providers available via env vars).
-4. Chunks and vectors land in Qdrant with UUID identifiers.
-5. Metrics record how many documents and chunks have been processed.
+2. The server splits text into semantically coherent chunks using a token budget derived from the embedding model.
+3. Embeddings are produced via the configured provider.
+4. Chunks + vectors are written to Qdrant.
+5. Metrics record documents/chunks processed and the most recent chunk size.
 
 ## Quick start
 
@@ -68,17 +66,31 @@ graph TD
    # adjust values as needed
    ```
 
-4. **Run the MCP server**
+4. **Install the CLI (recommended)**
+   Skip local builds by installing the published binary:
+   ```bash
+   cargo install rustymcp
+   ```
+   This places three executables in `~/.cargo/bin`:
+   - `rustymcp` → HTTP server entrypoint
+   - `rusty_mem_mcp` → MCP stdio server
+   - `metrics-post` → helper used by the metrics script
+
+5. **Run the MCP server**
    ```bash
    cargo run --bin rusty_mem_mcp
    ```
-   or build once and launch the release binary:
+   or, if you installed the crate, launch it directly:
+   ```bash
+   ~/.cargo/bin/rusty_mem_mcp
+   ```
+   Building from source once also works:
    ```bash
    cargo build --release --bin rusty_mem_mcp
    ./target/release/rusty_mem_mcp
    ```
 
-5. **Run the HTTP server** (optional if you only need MCP)
+6. **Run the HTTP server** (optional if you only need MCP)
 
 ```bash
 cargo run
@@ -86,8 +98,14 @@ cargo run
 
 The server listens on `SERVER_PORT` when that variable is set; otherwise it scans `4100-4199` and binds the first available port. Successful `POST /index` calls return `{ "chunks_indexed": <count>, "chunk_size": <tokens> }` so callers can observe the automatic budget.
 
-6. **Point your agent at the server**
-   - For Codex CLI (TOML):
+or, using the installed binary:
+
+```bash
+~/.cargo/bin/rustymcp
+```
+
+7. **Point your agent at the server**
+   - Codex CLI (TOML):
      ```toml
      [mcp_servers.rusty_mem]
      command = "/full/path/to/target/release/rusty_mem_mcp"
@@ -102,7 +120,7 @@ The server listens on `SERVER_PORT` when that variable is set; otherwise it scan
        EMBEDDING_DIMENSION = "768"
        OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
      ```
-   - For JSON-based clients (Kilo, Cline, Roo Code):
+   - JSON-based clients (Kilo, Cline, Roo Code):
      ```json
      {
        "mcpServers": {
@@ -126,41 +144,36 @@ The server listens on `SERVER_PORT` when that variable is set; otherwise it scan
 
    `TEXT_SPLITTER_CHUNK_SIZE` is now optional; the server infers a sensible value from the embedding model when the variable is omitted.
 
-7. **Use the built-in tools**
+8. **Use the built-in tools**
    - `get-collections` → list available Qdrant collections (`{}` payload).
    - `new-collection` → create or resize (`{ "name": "docs", "vector_size": 768 }`).
    - `push` → ingest (`{ "text": "my note", "collection": "docs" }`). The response echoes `chunksIndexed` and the effective `chunkSize`.
    - `metrics` → check `{ "documentsIndexed": …, "chunksIndexed": … }`.
      When documents have been ingested, the payload also includes `lastChunkSize`.
 
-## Docker Compose example
+## HTTP API quick reference
 
-To get a repeatable local environment, run Qdrant via Docker Compose and launch Rusty Memory on the host:
+Endpoints (all return JSON on success unless noted):
 
-```yaml
-version: "3.8"
+- `POST /index` – Index a document into the default or provided collection.
+  - Request: `{ "text": string, "collection"?: string }`
+  - Response: `{ "chunks_indexed": number, "chunk_size": number }`
+- `GET /collections` – List Qdrant collections.
+- `POST /collections` – Create or resize a collection.
+  - Request: `{ "name": string, "vector_size"?: number }`
+- `GET /metrics` – Read counters: `{ "documents_indexed": number, "chunks_indexed": number, "last_chunk_size"?: number }`
 
-services:
-  qdrant:
-    image: qdrant/qdrant:v1.10.1
-    ports:
-      - "6333:6333"   # REST API
-      - "6334:6334"   # gRPC (optional)
-    volumes:
-      - qdrant_storage:/qdrant/storage
-    restart: unless-stopped
+## Configuration
 
-volumes:
-  qdrant_storage:
-```
+Most deployments only set: `QDRANT_URL`, `QDRANT_COLLECTION_NAME`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, and `EMBEDDING_DIMENSION`. See the full reference in [docs/Configuration.md](docs/Configuration.md).
 
-Steps:
+## License
 
-1. Save the file as `docker-compose.yml` and run `docker compose up -d`.
-2. Update `QDRANT_URL` to `http://127.0.0.1:6333` (or the mapped host/port if different).
-3. Launch `rusty_mem_mcp` or the HTTP server as shown above.
+This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). It is free for noncommercial use. Commercial use is not permitted by this license.
 
-You can add a `rusty-mem` service that wraps the release binary if you prefer running everything inside Docker, but keeping the server on the host makes it easy to iterate with `cargo run` while Qdrant persists data in the container volume.
+## Contributing
+
+Contributions are welcome via pull requests. Please review the [Quality Manual](docs/QUALITY_MANUAL.md) for code style, testing, and automation expectations.
 
 ## Configuration reference
 

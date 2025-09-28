@@ -6,7 +6,7 @@
 - `src/bin/metrics_post.rs` exposes the metrics ingestion helper binary.
 - `docs/` captures product notes and engineering references.
 - `scripts/` contains reusable automation such as formatting and metrics hooks; generated artifacts are written into `reports/`.
-- `docs/Engineering_guide.md` (process and quality gates) and `docs/configuration.md` (environment guide) are the primary references when onboarding changes.
+- `docs/QUALITY_MANUAL.md` (process and quality gates) and `docs/Configuration.md` (environment guide) are the primary references when onboarding changes.
 
 ## Build, Test, and Development Commands
 
