@@ -104,39 +104,9 @@ Each milestone lists tasks, acceptance criteria, how to test, expected results, 
 
 ✅ Completed. Ollama is integrated as the primary embedding provider when `EMBEDDING_PROVIDER=ollama` (configurable via `OLLAMA_URL` and model env vars). The service validates vector dimensions, surfaces helpful connection errors, and falls back to the deterministic encoder for other providers. README/config docs updated; MCP integration test harness still mocks Qdrant, but all final validation was performed against live Ollama + Qdrant.
 
-### M3 – Push Metadata & Defaults
+### M3 – Status
 
-- Tasks
-  - Extend MCP `push` input to accept optional `project_id`, `memory_type`, `tags`, `source_uri`.
-  - Set ergonomic defaults: `project_id=default`, `memory_type=semantic`.
-  - Extend ingestion outcome to include dedupe counters: `inserted`, `updated`, `skippedDuplicates`.
-  - Add `index` as an alias to `push` in `describe_tools` and instructions.
-
-- Acceptance Criteria
-  - `push` accepts metadata and stores it in the payload; unspecified fields fall back to defaults.
-  - Response includes dedupe counters and existing fields (`chunksIndexed`, `chunkSize`).
-  - `index` alias behaves identically to `push`.
-
-- How to Test
-  - Unit: parse/validate input schema including defaults and aliases; verify dedupe counting in processing using deterministic inputs.
-  - Live: call MCP `push` with and without metadata and confirm payload fields present in Qdrant.
-
-- Expected Results
-  - Agents can provide metadata up front; repeated ingests show non‑zero `skippedDuplicates` as applicable.
-
-- Git Steps
-  - Commit message: `Extend push with metadata, defaults, and dedupe counters; add index alias`
-
-Implementation Notes (Refs)
-
-- rmcp ServerHandler methods: `call_tool`, `list_tools` — use existing pattern in `src/mcp.rs`.
-- Schema: extend `index_input_schema()` (JSON Schema with `enum`, `default`, and descriptions).
-- Data flow changes:
-  - Define `IngestMetadata { project_id?, memory_type?, tags?, source_uri? }`.
-  - Change `ProcessingService::process_and_index(&self, collection, text, meta)` to return `ProcessingOutcome { chunk_count, chunk_size, inserted, updated, skipped_duplicates }`.
-  - Implement intra-request dedupe: compute `chunk_hash` per chunk, drop duplicates before embeddings.
-  - Update `QdrantService::index_points(..., meta)` and `build_payload(...)` to apply metadata overrides and include optional fields.
-  - Keep default fallbacks for missing fields (`project_id=default`, `memory_type=semantic`).
+✅ Completed. `push`/`index` now accept optional metadata (`project_id`, `memory_type`, `tags`, `source_uri`) with defaults, intra-request dedupe is enforced before embedding, Qdrant payloads persist the overrides, and the ingestion outcome reports `inserted`, `updated`, and `skippedDuplicates` alongside `chunksIndexed`/`chunkSize`. Both HTTP `/index` and the MCP tool surface the richer response so clients see dedupe effects immediately.
 
 ### M4 – MCP Resources (Memory Types, Health)
 
