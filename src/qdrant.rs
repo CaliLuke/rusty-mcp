@@ -1,8 +1,10 @@
 use crate::config::get_config;
 use reqwest::{Client, Method, StatusCode, Url};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// Errors returned while interacting with Qdrant.
@@ -127,14 +129,17 @@ impl QdrantService {
         texts: Vec<String>,
         vectors: Vec<Vec<f32>>,
     ) -> Result<(), QdrantError> {
+        let now = current_timestamp_rfc3339();
         let points: Vec<_> = texts
             .into_iter()
             .zip(vectors.into_iter())
             .map(|(text, vector)| {
+                let memory_id = Uuid::new_v4().to_string();
+                let payload = build_payload(&memory_id, &text, &now);
                 json!({
-                    "id": Uuid::new_v4().to_string(),
+                    "id": memory_id,
                     "vector": vector,
-                    "payload": { "text": text }
+                    "payload": payload,
                 })
             })
             .collect();
@@ -158,6 +163,55 @@ impl QdrantService {
             );
         })
         .await
+    }
+
+    /// Ensure standard payload indexes exist for common filters.
+    pub async fn ensure_payload_indexes(&self, collection_name: &str) -> Result<(), QdrantError> {
+        // Fields and their schemas to index.
+        let fields: [(&str, &str); 5] = [
+            ("project_id", "keyword"),
+            ("memory_type", "keyword"),
+            ("tags", "keyword"),
+            ("timestamp", "datetime"),
+            ("chunk_hash", "keyword"),
+        ];
+
+        for (field, schema) in fields {
+            let body = json!({
+                "field_name": field,
+                "field_schema": schema,
+            });
+
+            let response = self
+                .request(Method::PUT, &format!("collections/{collection_name}/index"))?
+                .json(&body)
+                .send()
+                .await?;
+
+            // 2xx is success; 409 conflict means already exists in some versions — treat as ok.
+            if response.status().is_success() {
+                tracing::debug!(
+                    collection = collection_name,
+                    field,
+                    schema,
+                    "Payload index ensured"
+                );
+            } else if response.status() == StatusCode::CONFLICT {
+                tracing::debug!(
+                    collection = collection_name,
+                    field,
+                    schema,
+                    "Payload index already exists"
+                );
+            } else {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                let error = QdrantError::UnexpectedStatus { status, body };
+                tracing::warn!(collection = collection_name, field, schema, error = %error, "Failed to ensure payload index");
+            }
+        }
+
+        Ok(())
     }
 
     async fn collection_exists(&self, collection_name: &str) -> Result<bool, QdrantError> {
@@ -223,6 +277,40 @@ fn format_endpoint(base: &str, path: &str) -> String {
     format!("{base}/{path}")
 }
 
+fn build_payload(memory_id: &str, text: &str, timestamp_rfc3339: &str) -> Value {
+    let chunk_hash = compute_chunk_hash(text);
+    json!({
+        "memory_id": memory_id,
+        "project_id": default_project_id(),
+        "memory_type": default_memory_type(),
+        "timestamp": timestamp_rfc3339,
+        "chunk_hash": chunk_hash,
+        // source_uri and tags are optional and can be added later from higher layers
+        "text": text,
+    })
+}
+
+fn compute_chunk_hash(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(digest)
+}
+
+fn current_timestamp_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+fn default_project_id() -> &'static str {
+    "default"
+}
+
+fn default_memory_type() -> &'static str {
+    "semantic"
+}
+
 #[derive(Deserialize)]
 struct ListCollectionsResponse {
     result: ListCollectionsResult,
@@ -236,4 +324,37 @@ struct ListCollectionsResult {
 #[derive(Deserialize)]
 struct CollectionDescription {
     name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_hash_is_stable() {
+        let text = "Hello world";
+        let h1 = compute_chunk_hash(text);
+        let h2 = compute_chunk_hash(text);
+        assert_eq!(h1, h2);
+        assert!(!h1.is_empty());
+    }
+
+    #[test]
+    fn timestamp_is_rfc3339_like() {
+        let ts = current_timestamp_rfc3339();
+        assert!(ts.contains('T') && ts.ends_with('Z'));
+    }
+
+    #[test]
+    fn payload_includes_defaults_and_text() {
+        let id = Uuid::new_v4().to_string();
+        let now = "2025-01-01T00:00:00Z";
+        let payload = build_payload(&id, "sample", now);
+        assert_eq!(payload["memory_id"], id);
+        assert_eq!(payload["project_id"], default_project_id());
+        assert_eq!(payload["memory_type"], default_memory_type());
+        assert_eq!(payload["timestamp"], now);
+        assert_eq!(payload["text"], "sample");
+        assert!(payload["chunk_hash"].as_str().unwrap().len() > 10);
+    }
 }

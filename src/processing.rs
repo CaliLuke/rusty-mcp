@@ -84,6 +84,11 @@ impl ProcessingService {
             .create_collection_if_not_exists(&config.qdrant_collection_name, vector_size)
             .await
             .expect("Failed to ensure Qdrant collection exists");
+        // Ensure standard payload indexes exist for filters.
+        qdrant_service
+            .ensure_payload_indexes(&config.qdrant_collection_name)
+            .await
+            .expect("Failed to ensure Qdrant payload indexes");
         tracing::debug!(collection = %config.qdrant_collection_name, "Primary collection ready");
 
         Self {
@@ -159,10 +164,13 @@ impl ProcessingService {
         self.qdrant_service
             .create_collection_if_not_exists(collection_name, vector_size)
             .await
-            .map_err(ProcessingError::from)
-            .map(|()| {
-                tracing::debug!(collection = collection_name, "Collection ensured");
-            })
+            .map_err(ProcessingError::from)?;
+        self.qdrant_service
+            .ensure_payload_indexes(collection_name)
+            .await
+            .map_err(ProcessingError::from)?;
+        tracing::debug!(collection = collection_name, "Collection ensured");
+        Ok(())
     }
 
     /// Create or resize a collection with the desired vector size.
@@ -182,14 +190,17 @@ impl ProcessingService {
         self.qdrant_service
             .create_collection(collection_name, size)
             .await
-            .map_err(ProcessingError::from)
-            .map(|()| {
-                tracing::info!(
-                    collection = collection_name,
-                    vector_size = size,
-                    "Collection created"
-                );
-            })
+            .map_err(ProcessingError::from)?;
+        self.qdrant_service
+            .ensure_payload_indexes(collection_name)
+            .await
+            .map_err(ProcessingError::from)?;
+        tracing::info!(
+            collection = collection_name,
+            vector_size = size,
+            "Collection created"
+        );
+        Ok(())
     }
 
     /// Enumerate all collections currently known to Qdrant.

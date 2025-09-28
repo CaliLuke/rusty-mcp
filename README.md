@@ -52,6 +52,7 @@ If you want to hack on the codebase or learn how it works internally, jump to De
 5. Add to your agent
 
    - Codex CLI (`~/.codex/config.toml`):
+
      ```toml
      [mcp_servers.rusty_mem]
      command = "rusty_mem_mcp" # or use the full path to the binary
@@ -67,6 +68,7 @@ If you want to hack on the codebase or learn how it works internally, jump to De
      ```
 
    - JSON clients (Kilo, Cline, Roo Code):
+
      ```json
      {
        "mcpServers": {

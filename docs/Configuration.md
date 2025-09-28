@@ -54,7 +54,7 @@ transport = "stdio"
 
 `TEXT_SPLITTER_CHUNK_SIZE` is optional—omit it unless you need a specific chunk size.
 
-**Step-by-step for new users**
+## Step-by-step for new users**
 
 1. Install: `cargo install rustymcp`.
 2. Ensure `~/.cargo/bin` is on your PATH (or use the full binary path in `command`).
@@ -83,7 +83,7 @@ transport = "stdio"
 
 As with the TOML example, only add `TEXT_SPLITTER_CHUNK_SIZE` if you want to override the automatic chunker budget.
 
-**Step-by-step for new users**
+### Step-by-step for new users**
 
 1. Install: `cargo install rustymcp` and ensure the binary is on PATH.
 2. Paste the configuration into the MCP section of your editor and reload it.
