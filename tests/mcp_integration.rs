@@ -48,9 +48,10 @@ impl TestHarness {
             set_env("QDRANT_URL", &base_url);
             set_env("QDRANT_COLLECTION_NAME", "rusty-mem");
             set_env("EMBEDDING_PROVIDER", "ollama");
-            set_env("EMBEDDING_MODEL", "test-model");
-            set_env("EMBEDDING_DIMENSION", "8");
+            set_env("EMBEDDING_MODEL", "nomic-embed-text:latest");
+            set_env("EMBEDDING_DIMENSION", "768");
             set_env("TEXT_SPLITTER_CHUNK_SIZE", "4");
+            set_env("OLLAMA_URL", "http://127.0.0.1:11434");
 
             MOCK_SERVER.set(mock_server).ok();
 

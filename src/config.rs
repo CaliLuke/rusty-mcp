@@ -31,6 +31,8 @@ pub struct Config {
     pub embedding_model: String,
     /// Dimensionality of the produced vectors.
     pub embedding_dimension: usize,
+    /// Base URL of the Ollama runtime providing embeddings (when enabled).
+    pub ollama_url: Option<String>,
     /// Optional override for the HTTP server port.
     pub server_port: Option<u16>,
 }
@@ -66,6 +68,7 @@ impl Config {
             embedding_dimension: load_env("EMBEDDING_DIMENSION")?.parse().map_err(|_| {
                 ConfigError::MissingVariable("Invalid EMBEDDING_DIMENSION".to_string())
             })?,
+            ollama_url: load_env_optional("OLLAMA_URL"),
             server_port: load_env_optional("SERVER_PORT")
                 .map(|value| {
                     value
@@ -114,6 +117,7 @@ pub fn init_config() {
         collection = %config.qdrant_collection_name,
         server_port = ?config.server_port,
         embedding_provider = ?config.embedding_provider,
+        ollama_url = ?config.ollama_url,
         "Loaded configuration"
     );
     CONFIG.set(config).expect("Failed to set config");

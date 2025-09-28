@@ -39,9 +39,10 @@ If you want to hack on the codebase or learn how it works internally, jump to De
    Required variables:
    - `QDRANT_URL` (e.g. `http://127.0.0.1:6333`)
    - `QDRANT_COLLECTION_NAME` (e.g. `rusty-mem`)
-   - `EMBEDDING_PROVIDER` (`ollama` or `openai` — used for logging today)
+   - `EMBEDDING_PROVIDER` (`ollama` enables the local client; other values use the deterministic fallback for now)
    - `EMBEDDING_MODEL` (free‑form, e.g. `nomic-embed-text`)
    - `EMBEDDING_DIMENSION` (must match your model, e.g. `768`)
+   - `OLLAMA_URL` (optional, defaults to `http://127.0.0.1:11434` when `EMBEDDING_PROVIDER=ollama`)
 
 4. Launch the MCP server
 
@@ -65,6 +66,7 @@ If you want to hack on the codebase or learn how it works internally, jump to De
        EMBEDDING_PROVIDER = "ollama"
        EMBEDDING_MODEL = "nomic-embed-text"
        EMBEDDING_DIMENSION = "768"
+       OLLAMA_URL = "http://127.0.0.1:11434" # omit to use the default
      ```
 
    - JSON clients (Kilo, Cline, Roo Code):
@@ -79,9 +81,10 @@ If you want to hack on the codebase or learn how it works internally, jump to De
            "env": {
              "QDRANT_URL": "http://127.0.0.1:6333",
              "QDRANT_COLLECTION_NAME": "rusty-mem",
-             "EMBEDDING_PROVIDER": "ollama",
-             "EMBEDDING_MODEL": "nomic-embed-text",
-             "EMBEDDING_DIMENSION": "768"
+           "EMBEDDING_PROVIDER": "ollama",
+           "EMBEDDING_MODEL": "nomic-embed-text",
+            "EMBEDDING_DIMENSION": "768",
+            "OLLAMA_URL": "http://127.0.0.1:11434"
            }
          }
        }
