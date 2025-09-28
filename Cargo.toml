@@ -1,14 +1,18 @@
 [package]
-name = "rusty-mem"
+name = "rustymcp"
 version = "0.1.0"
 edition = "2024"
-default-run = "rusty-mem"
+default-run = "rustymcp"
 description = "Rusty Memory is a no-fuss memory server for coding agents."
 license = "PolyForm-Noncommercial-1.0.0"
 repository = "https://github.com/CaliLuke/rusty-mcp"
 readme = "README.md"
 keywords = ["mcp", "memory", "vector", "ai", "qdrant"]
 categories = ["command-line-utilities"]
+
+[lib]
+name = "rusty_mem"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0.86"
