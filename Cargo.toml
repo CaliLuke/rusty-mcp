@@ -1,0 +1,45 @@
+[package]
+name = "rusty-mem"
+version = "0.1.0"
+edition = "2024"
+default-run = "rusty-mem"
+
+[dependencies]
+anyhow = "1.0.86"
+async-trait = "0.1.80"
+axum = "0.7.5"
+dotenvy = "0.15.7"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.117"
+thiserror = "1.0.61"
+tokio = { version = "1.38.0", features = ["full"] }
+uuid = { version = "1.8.0", features = ["v4"] }
+semchunk-rs = "0.1.1"
+tracing = { version = "0.1", features = ["log"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
+clap = { version = "4.5.4", features = ["derive"] }
+walkdir = "2.5"
+rmcp = { version = "0.7.0", default-features = false, features = [
+  "macros",
+  "server",
+  "client",
+  "transport-io",
+  "base64",
+  "schemars",
+] }
+
+[[bin]]
+name = "metrics-post"
+path = "src/bin/metrics_post.rs"
+
+[dev-dependencies]
+cargo-husky = { version = "1", default-features = false, features = [
+  "user-hooks",
+] }
+httpmock = "0.7"
+regex = "1"
+
+[package.metadata.cargo-machete]
+ignored = ["cargo-husky"]

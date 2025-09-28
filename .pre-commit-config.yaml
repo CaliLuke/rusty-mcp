@@ -1,0 +1,54 @@
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  - repo: local
+    hooks:
+      - id: verify-fast
+        name: verify fast (fmt, test)
+        entry: ./scripts/hook-verify-fast.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: taplo-fmt
+        name: taplo fmt --check
+        entry: ./scripts/hook-taplo.sh
+        language: system
+        pass_filenames: true
+        files: "\\.toml$"
+        require_serial: true
+      - id: markdown-fmt
+        name: dprint fmt --check (markdown)
+        entry: ./scripts/hook-dprint.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: metrics-soft
+        name: metrics soft run
+        entry: ./scripts/hook-metrics.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+      # Temporarily disabled: geiger scan hangs. Re-enable once fixed.
+      # - id: geiger-scan
+      #   name: cargo geiger --forbid-only
+      #   entry: ./scripts/hook-geiger.sh
+      #   language: system
+      #   pass_filenames: false
+      #   always_run: true
+  - repo: local
+    hooks:
+      - id: verify-on-push
+        name: verify on push (fmt, clippy, test, doc)
+        entry: ./scripts/verify.sh
+        language: system
+        pass_filenames: false
+        stages: [push]
+        args: [fmt, clippy, test, doc]
+  - repo: local
+    hooks:
+      - id: spellcheck
+        name: cargo spellcheck (manual)
+        entry: ./scripts/hook-spellcheck.sh
+        language: system
+        pass_filenames: false
+        stages: [manual]
