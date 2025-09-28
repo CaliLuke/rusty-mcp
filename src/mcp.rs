@@ -1,6 +1,9 @@
 use std::{borrow::Cow, sync::Arc};
 
-use crate::{config::get_config, processing::ProcessingService};
+use crate::{
+    config::get_config,
+    processing::{IngestMetadata, ProcessingService},
+};
 use rmcp::{
     ErrorData as McpError,
     handler::server::ServerHandler,
@@ -26,17 +29,34 @@ impl RustyMemMcpServer {
     }
 
     fn describe_tools(&self) -> Vec<Tool> {
+        let push_schema = Arc::new(index_input_schema());
         vec![
             Tool {
                 name: Cow::Borrowed("push"),
                 title: Some("Index Document".to_string()),
                 description: Some(Cow::Borrowed(
-                    "Split the provided text, embed each chunk, and upsert into Qdrant. The result payload includes `chunksIndexed` and `chunkSize` so hosts can track the applied budget. Required: `text` (string). Optional: `collection` (string) overrides the default target. Example: {\n  \"text\": \"docs about user onboarding\",\n  \"collection\": \"support-notes\"\n}.",
+                    "Split the provided text, embed each chunk, and upsert into Qdrant. Required: `text`. Optional metadata: `collection`, `project_id`, `memory_type`, `tags`, `source_uri`. Defaults: `project_id=default`, `memory_type=semantic`. The response echoes `chunksIndexed`, `chunkSize`, `inserted`, `updated`, and `skippedDuplicates`.",
                 )),
-                input_schema: Arc::new(index_input_schema()),
+                input_schema: push_schema.clone(),
                 output_schema: None,
                 annotations: Some(
                     ToolAnnotations::with_title("Index Document")
+                        .destructive(true)
+                        .idempotent(false)
+                        .open_world(false),
+                ),
+                icons: None,
+            },
+            Tool {
+                name: Cow::Borrowed("index"),
+                title: Some("Alias: push".to_string()),
+                description: Some(Cow::Borrowed(
+                    "Alias for `push` to mirror the HTTP endpoint name. Accepts the same payload and returns identical results.",
+                )),
+                input_schema: push_schema.clone(),
+                output_schema: None,
+                annotations: Some(
+                    ToolAnnotations::with_title("Index Document (alias)")
                         .destructive(true)
                         .idempotent(false)
                         .open_world(false),
@@ -106,7 +126,7 @@ impl ServerHandler for RustyMemMcpServer {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: implementation,
             instructions: Some(
-                "Rusty Memory MCP usage:\n1. Call get-collections to discover existing Qdrant collections (pass {}).\n2. To create or update a collection, call new-collection with { \"name\": <collection>, \"vector_size\": <optional dimension> }.\n3. Push content with push using { \"text\": <document>, \"collection\": <optional override> }. The response includes both `chunksIndexed` and `chunkSize`.\n4. Inspect ingestion counters via metrics (pass {}) to confirm documents were processed; the result echoes `lastChunkSize`.\nAll tool responses return structured JSON; prefer the structured payload over the text summary.".into(),
+                "Rusty Memory MCP usage:\n1. Call get-collections to discover existing Qdrant collections (pass {}).\n2. To create or update a collection, call new-collection with { \"name\": <collection>, \"vector_size\": <optional dimension> }.\n3. Push content with push (or index) using { \"text\": <document>, \"collection\": <optional override>, \"project_id\": \"default\" (optional), \"memory_type\": \"semantic\" (optional), \"tags\": [<strings>], \"source_uri\": <string> }. Responses include `chunksIndexed`, `chunkSize`, `inserted`, `updated`, and `skippedDuplicates`.\n4. Inspect ingestion counters via metrics (pass {}) to confirm documents were processed; the result echoes `lastChunkSize`.\nAll tool responses return structured JSON; prefer the structured payload over the text summary.".into(),
             ),
             ..ServerInfo::default()
         }
@@ -129,17 +149,29 @@ impl ServerHandler for RustyMemMcpServer {
         let processing = self.processing.clone();
         async move {
             match request.name.as_ref() {
-                "push" => {
+                "push" | "index" => {
                     let args: IndexToolRequest = parse_arguments(request.arguments)?;
                     if args.text.trim().is_empty() {
                         return Err(McpError::invalid_params("`text` must not be empty", None));
                     }
-                    let collection = args
-                        .collection
-                        .unwrap_or_else(|| get_config().qdrant_collection_name.clone());
-                    let text = args.text;
+                    let IndexToolRequest {
+                        text,
+                        collection,
+                        project_id,
+                        memory_type,
+                        tags,
+                        source_uri,
+                    } = args;
+                    let collection =
+                        collection.unwrap_or_else(|| get_config().qdrant_collection_name.clone());
+                    let metadata = IngestMetadata {
+                        project_id,
+                        memory_type,
+                        tags,
+                        source_uri,
+                    };
                     let outcome = processing
-                        .process_and_index(&collection, text)
+                        .process_and_index(&collection, text, metadata)
                         .await
                         .map_err(|err| McpError::internal_error(err.to_string(), None))?;
                     Ok(CallToolResult::structured(json!({
@@ -147,6 +179,9 @@ impl ServerHandler for RustyMemMcpServer {
                         "collection": collection,
                         "chunksIndexed": outcome.chunk_count,
                         "chunkSize": outcome.chunk_size,
+                        "inserted": outcome.inserted,
+                        "updated": outcome.updated,
+                        "skippedDuplicates": outcome.skipped_duplicates,
                     })))
                 }
                 "get-collections" => {
@@ -198,6 +233,14 @@ struct IndexToolRequest {
     text: String,
     #[serde(default)]
     collection: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    memory_type: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    source_uri: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,6 +268,52 @@ fn index_input_schema() -> JsonObject {
         Value::String("Optional override for the Qdrant collection".into()),
     );
     properties.insert("collection".into(), Value::Object(collection_schema));
+
+    let mut project_schema = JsonObject::new();
+    project_schema.insert("type".into(), Value::String("string".into()));
+    project_schema.insert(
+        "description".into(),
+        Value::String("Optional project identifier; defaults to 'default'.".into()),
+    );
+    project_schema.insert("default".into(), Value::String("default".into()));
+    properties.insert("project_id".into(), Value::Object(project_schema));
+
+    let mut memory_schema = JsonObject::new();
+    memory_schema.insert("type".into(), Value::String("string".into()));
+    memory_schema.insert(
+        "description".into(),
+        Value::String("Optional memory type; defaults to 'semantic'.".into()),
+    );
+    memory_schema.insert(
+        "enum".into(),
+        Value::Array(
+            ["episodic", "semantic", "procedural"]
+                .into_iter()
+                .map(|variant| Value::String(variant.into()))
+                .collect(),
+        ),
+    );
+    memory_schema.insert("default".into(), Value::String("semantic".into()));
+    properties.insert("memory_type".into(), Value::Object(memory_schema));
+
+    let mut tag_item_schema = JsonObject::new();
+    tag_item_schema.insert("type".into(), Value::String("string".into()));
+    let mut tags_schema = JsonObject::new();
+    tags_schema.insert("type".into(), Value::String("array".into()));
+    tags_schema.insert(
+        "description".into(),
+        Value::String("Optional tags applied to each chunk.".into()),
+    );
+    tags_schema.insert("items".into(), Value::Object(tag_item_schema));
+    properties.insert("tags".into(), Value::Object(tags_schema));
+
+    let mut source_schema = JsonObject::new();
+    source_schema.insert("type".into(), Value::String("string".into()));
+    source_schema.insert(
+        "description".into(),
+        Value::String("Optional URI (file path, URL) describing the memory source.".into()),
+    );
+    properties.insert("source_uri".into(), Value::Object(source_schema));
 
     finalize_object_schema(properties, &["text"])
 }

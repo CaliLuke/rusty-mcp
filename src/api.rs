@@ -1,5 +1,5 @@
 use crate::config::get_config;
-use crate::processing::{ProcessingError, ProcessingService};
+use crate::processing::{IngestMetadata, ProcessingError, ProcessingService};
 use axum::{
     Json, Router,
     extract::State,
@@ -35,6 +35,9 @@ struct IndexRequest {
 struct IndexResponse {
     chunks_indexed: usize,
     chunk_size: usize,
+    inserted: usize,
+    updated: usize,
+    skipped_duplicates: usize,
 }
 
 async fn index_document(
@@ -45,17 +48,23 @@ async fn index_document(
         .collection
         .unwrap_or_else(|| get_config().qdrant_collection_name.clone());
     let outcome = service
-        .process_and_index(&collection_name, request.text)
+        .process_and_index(&collection_name, request.text, IngestMetadata::default())
         .await?;
     tracing::info!(
         collection = collection_name,
         chunks = outcome.chunk_count,
         chunk_size = outcome.chunk_size,
+        inserted = outcome.inserted,
+        updated = outcome.updated,
+        skipped_duplicates = outcome.skipped_duplicates,
         "Index request completed"
     );
     Ok(Json(IndexResponse {
         chunks_indexed: outcome.chunk_count,
         chunk_size: outcome.chunk_size,
+        inserted: outcome.inserted,
+        updated: outcome.updated,
+        skipped_duplicates: outcome.skipped_duplicates,
     }))
 }
 

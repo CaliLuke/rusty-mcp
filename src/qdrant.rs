@@ -1,7 +1,7 @@
 use crate::config::get_config;
 use reqwest::{Client, Method, StatusCode, Url};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -31,6 +31,39 @@ pub struct QdrantService {
     client: Client,
     base_url: String,
     api_key: Option<String>,
+}
+
+/// Optional metadata fields propagated into each Qdrant payload.
+#[derive(Debug, Clone, Default)]
+pub struct PayloadOverrides {
+    /// Override for the `project_id` field.
+    pub project_id: Option<String>,
+    /// Override for the `memory_type` field.
+    pub memory_type: Option<String>,
+    /// Tags attached to each chunk for filterable metadata.
+    pub tags: Option<Vec<String>>,
+    /// Optional URI describing the chunk source.
+    pub source_uri: Option<String>,
+}
+
+/// Prepared point ready for indexing, including text, hash, and vector.
+#[derive(Debug, Clone)]
+pub struct PointInsert {
+    /// Raw chunk text.
+    pub text: String,
+    /// Deterministic hash of the chunk used for dedupe.
+    pub chunk_hash: String,
+    /// Embedding vector produced for the chunk.
+    pub vector: Vec<f32>,
+}
+
+/// Summary describing how Qdrant applied an indexing request.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IndexSummary {
+    /// Number of new vectors inserted by the request.
+    pub inserted: usize,
+    /// Number of vectors updated in place.
+    pub updated: usize,
 }
 
 impl QdrantService {
@@ -126,32 +159,36 @@ impl QdrantService {
     pub async fn index_points(
         &self,
         collection_name: &str,
-        texts: Vec<String>,
-        vectors: Vec<Vec<f32>>,
-    ) -> Result<(), QdrantError> {
+        points: Vec<PointInsert>,
+        overrides: &PayloadOverrides,
+    ) -> Result<IndexSummary, QdrantError> {
+        if points.is_empty() {
+            return Ok(IndexSummary::default());
+        }
+
         let now = current_timestamp_rfc3339();
-        let points: Vec<_> = texts
+        let serialized: Vec<_> = points
             .into_iter()
-            .zip(vectors.into_iter())
-            .map(|(text, vector)| {
+            .map(|point| {
                 let memory_id = Uuid::new_v4().to_string();
-                let payload = build_payload(&memory_id, &text, &now);
+                let payload =
+                    build_payload(&memory_id, &point.text, &now, &point.chunk_hash, overrides);
                 json!({
                     "id": memory_id,
-                    "vector": vector,
+                    "vector": point.vector,
                     "payload": payload,
                 })
             })
             .collect();
 
-        let point_count = points.len();
+        let point_count = serialized.len();
         let response = self
             .request(
                 Method::PUT,
                 &format!("collections/{}/points", collection_name),
             )?
             .query(&[("wait", true)])
-            .json(&json!({ "points": points }))
+            .json(&json!({ "points": serialized }))
             .send()
             .await?;
 
@@ -162,7 +199,12 @@ impl QdrantService {
                 "Points indexed"
             );
         })
-        .await
+        .await?;
+
+        Ok(IndexSummary {
+            inserted: point_count,
+            updated: 0,
+        })
     }
 
     /// Ensure standard payload indexes exist for common filters.
@@ -277,20 +319,60 @@ fn format_endpoint(base: &str, path: &str) -> String {
     format!("{base}/{path}")
 }
 
-fn build_payload(memory_id: &str, text: &str, timestamp_rfc3339: &str) -> Value {
-    let chunk_hash = compute_chunk_hash(text);
-    json!({
-        "memory_id": memory_id,
-        "project_id": default_project_id(),
-        "memory_type": default_memory_type(),
-        "timestamp": timestamp_rfc3339,
-        "chunk_hash": chunk_hash,
-        // source_uri and tags are optional and can be added later from higher layers
-        "text": text,
-    })
+fn build_payload(
+    memory_id: &str,
+    text: &str,
+    timestamp_rfc3339: &str,
+    chunk_hash: &str,
+    overrides: &PayloadOverrides,
+) -> Value {
+    let mut payload = Map::new();
+    payload.insert("memory_id".into(), Value::String(memory_id.to_string()));
+    payload.insert(
+        "project_id".into(),
+        Value::String(
+            overrides
+                .project_id
+                .clone()
+                .unwrap_or_else(default_project_id),
+        ),
+    );
+    payload.insert(
+        "memory_type".into(),
+        Value::String(
+            overrides
+                .memory_type
+                .clone()
+                .unwrap_or_else(default_memory_type),
+        ),
+    );
+    payload.insert(
+        "timestamp".into(),
+        Value::String(timestamp_rfc3339.to_string()),
+    );
+    payload.insert("chunk_hash".into(), Value::String(chunk_hash.to_string()));
+    payload.insert("text".into(), Value::String(text.to_string()));
+
+    if let Some(source_uri) = overrides
+        .source_uri
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        payload.insert("source_uri".into(), Value::String(source_uri.clone()));
+    }
+
+    if let Some(tags) = overrides.tags.as_ref().filter(|tags| !tags.is_empty()) {
+        payload.insert(
+            "tags".into(),
+            Value::Array(tags.iter().map(|tag| Value::String(tag.clone())).collect()),
+        );
+    }
+
+    Value::Object(payload)
 }
 
-fn compute_chunk_hash(text: &str) -> String {
+/// Compute a deterministic SHA-256 hash for the chunk text.
+pub fn compute_chunk_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let digest = hasher.finalize();
@@ -303,12 +385,12 @@ fn current_timestamp_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
-fn default_project_id() -> &'static str {
-    "default"
+fn default_project_id() -> String {
+    "default".to_string()
 }
 
-fn default_memory_type() -> &'static str {
-    "semantic"
+fn default_memory_type() -> String {
+    "semantic".to_string()
 }
 
 #[derive(Deserialize)]
@@ -349,12 +431,33 @@ mod tests {
     fn payload_includes_defaults_and_text() {
         let id = Uuid::new_v4().to_string();
         let now = "2025-01-01T00:00:00Z";
-        let payload = build_payload(&id, "sample", now);
+        let chunk_hash = "abc123";
+        let payload = build_payload(&id, "sample", now, chunk_hash, &PayloadOverrides::default());
         assert_eq!(payload["memory_id"], id);
         assert_eq!(payload["project_id"], default_project_id());
         assert_eq!(payload["memory_type"], default_memory_type());
         assert_eq!(payload["timestamp"], now);
         assert_eq!(payload["text"], "sample");
-        assert!(payload["chunk_hash"].as_str().unwrap().len() > 10);
+        assert_eq!(payload["chunk_hash"], chunk_hash);
+    }
+
+    #[test]
+    fn payload_applies_overrides() {
+        let id = Uuid::new_v4().to_string();
+        let now = "2025-01-01T00:00:00Z";
+        let overrides = PayloadOverrides {
+            project_id: Some("proj".into()),
+            memory_type: Some("episodic".into()),
+            tags: Some(vec!["alpha".into(), "beta".into()]),
+            source_uri: Some("file://doc".into()),
+        };
+        let payload = build_payload(&id, "sample", now, "hash", &overrides);
+        assert_eq!(payload["project_id"], "proj");
+        assert_eq!(payload["memory_type"], "episodic");
+        assert_eq!(payload["source_uri"], "file://doc");
+        let tags = payload["tags"].as_array().expect("tags present");
+        assert_eq!(tags.len(), 2);
+        assert!(tags.iter().any(|tag| tag == "alpha"));
+        assert!(tags.iter().any(|tag| tag == "beta"));
     }
 }

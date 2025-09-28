@@ -96,7 +96,7 @@ If you want to hack on the codebase or learn how it works internally, jump to De
    From your agent, use:
    - `get-collections` → list Qdrant collections
    - `new-collection` → create or resize a collection
-   - `push` → index text into a collection
+   - `push` (alias: `index`) → index text with optional metadata (`project_id`, `memory_type`, `tags`, `source_uri`)
    - `metrics` → view counters (`documentsIndexed`, `chunksIndexed`, `lastChunkSize`)
 
 ## Optional: Run the HTTP server
@@ -115,7 +115,7 @@ curl -sS -X POST http://127.0.0.1:4100/index \
   -d '{"text":"hello from http"}'
 ```
 
-Returns `{ "chunks_indexed": <number>, "chunk_size": <number> }` on success.
+Returns `{ "chunks_indexed": <number>, "chunk_size": <number>, "inserted": <number>, "updated": <number>, "skipped_duplicates": <number> }` on success.
 
 Having trouble? See `docs/Troubleshooting.md`.
 

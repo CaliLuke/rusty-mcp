@@ -54,11 +54,11 @@ graph TD
 
 1. Configuration is loaded once via `config::init_config()`; subsequent reads use the cached instance.
 2. The HTTP server binds to `SERVER_PORT` when provided or the first free port in `4100-4199`.
-3. `ProcessingService::process_and_index` performs the ingestion steps:
+3. `ProcessingService::process_and_index` performs the ingestion steps (and accepts optional metadata overrides so callers can set `project_id`, `memory_type`, `tags`, and `source_uri`):
    - Split the document with `semchunk_rs::Chunker` using an automatically derived token budget (override with `TEXT_SPLITTER_CHUNK_SIZE` when needed).
    - Generate deterministic embeddings for each chunk through `embedding::AiLibClient`. The current implementation hashes bytes into a normalised vector of length `EMBEDDING_DIMENSION`.
-   - Ensure the target Qdrant collection exists (`QdrantService::create_collection_if_not_exists`) and upload the chunks with randomly generated UUIDs.
-   - Update the `CodeMetrics` counters with the number of documents and chunks processed.
+   - Ensure the target Qdrant collection exists (`QdrantService::create_collection_if_not_exists`) and upload the chunks with randomly generated UUIDs, persisting metadata and dedupe counters (`inserted`, `updated`, `skipped_duplicates`).
+   - Update the `CodeMetrics` counters with the number of documents and chunks processed (even if dedupe skips all chunks).
 4. The MCP server reuses the same processing service instance, so the chunking and storage behaviour is identical across interfaces.
 
 ## Interfaces
@@ -79,12 +79,12 @@ All handlers return `500 Internal Server Error` with a descriptive message when 
 
 `RustyMemMcpServer` advertises four tools:
 
-| Tool              | Purpose                                                    | Parameters                                                    | Structured Result                                                   |
-| ----------------- | ---------------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `push`            | Index a document.                                          | `{ "text": string, "collection"?: string }` (required `text`) | `{ "status": "ok", "collection": string, "chunksIndexed": number }` |
-| `get-collections` | List Qdrant collections.                                   | `{}`                                                          | `{ "collections": [string] }`                                       |
-| `new-collection`  | Create or update a collection with a specific vector size. | `{ "name": string, "vector_size"?: number }`                  | `{ "status": "ok", "vectorSize": number }`                          |
-| `metrics`         | Return ingestion counters.                                 | `{}`                                                          | `{ "documentsIndexed": number, "chunksIndexed": number }`           |
+| Tool              | Purpose                                                    | Parameters                                                                                                                                             | Structured Result                                                                                                                                            |
+| ----------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `push` / `index`  | Index a document.                                          | `{ "text": string, "collection"?: string, "project_id"?: string, "memory_type"?: string, "tags"?: [string], "source_uri"?: string }` (required `text`) | `{ "status": "ok", "collection": string, "chunksIndexed": number, "chunkSize": number, "inserted": number, "updated": number, "skippedDuplicates": number }` |
+| `get-collections` | List Qdrant collections.                                   | `{}`                                                                                                                                                   | `{ "collections": [string] }`                                                                                                                                |
+| `new-collection`  | Create or update a collection with a specific vector size. | `{ "name": string, "vector_size"?: number }`                                                                                                           | `{ "status": "ok", "vectorSize": number }`                                                                                                                   |
+| `metrics`         | Return ingestion counters.                                 | `{}`                                                                                                                                                   | `{ "documentsIndexed": number, "chunksIndexed": number }`                                                                                                    |
 
 During `initialize`, the server shares usage instructions that mirror the four-step workflow above.
 

@@ -1,9 +1,12 @@
 use crate::config::{EmbeddingProvider, get_config};
 use crate::embedding::{EmbeddingClient, get_embedding_client};
 use crate::metrics::{CodeMetrics, MetricsSnapshot};
-use crate::qdrant::{QdrantError, QdrantService};
+use crate::qdrant::{
+    IndexSummary, PayloadOverrides, PointInsert, QdrantError, QdrantService, compute_chunk_hash,
+};
 use anyhow::Error as TokenizerError;
 use semchunk_rs::Chunker;
+use std::collections::HashSet;
 use std::sync::Arc;
 use thiserror::Error;
 use tiktoken_rs::{
@@ -65,6 +68,12 @@ pub struct ProcessingOutcome {
     pub chunk_count: usize,
     /// Chunk size used during processing.
     pub chunk_size: usize,
+    /// Number of new vectors inserted into Qdrant.
+    pub inserted: usize,
+    /// Number of existing vectors that were updated in place.
+    pub updated: usize,
+    /// Chunks skipped within the request due to duplicate `chunk_hash`.
+    pub skipped_duplicates: usize,
 }
 
 impl ProcessingService {
@@ -101,12 +110,14 @@ impl ProcessingService {
     /// Chunk, embed, and index a document.
     ///
     /// Text is split using model-aware chunk sizes, embedded via the configured provider, and
-    /// flushed to Qdrant in a single batch.  The structured [`ProcessingOutcome`] reports how
-    /// many chunks were generated and which chunk size heuristic was applied.
+    /// flushed to Qdrant in a single batch. Metadata overrides customize the payload without
+    /// breaking backwards compatibility. The structured [`ProcessingOutcome`] reports how many
+    /// chunks were generated, which chunk size heuristic was applied, and dedupe counters.
     pub async fn process_and_index(
         &self,
         collection_name: &str,
         text: String,
+        metadata: IngestMetadata,
     ) -> Result<ProcessingOutcome, ProcessingError> {
         tracing::info!(collection = collection_name, "Processing document");
         let config = get_config();
@@ -129,15 +140,36 @@ impl ProcessingService {
             config.embedding_provider,
             &config.embedding_model,
         )?;
-        let chunk_count = chunks.len();
-        let embeddings = self
-            .embedding_client
-            .generate_embeddings(chunks.clone())
+        let (prepared_chunks, skipped_duplicates) = dedupe_chunks(chunks);
+        let texts: Vec<String> = prepared_chunks
+            .iter()
+            .map(|chunk| chunk.text.clone())
+            .collect();
+        let embeddings = if texts.is_empty() {
+            Vec::new()
+        } else {
+            self.embedding_client.generate_embeddings(texts).await?
+        };
+
+        debug_assert_eq!(prepared_chunks.len(), embeddings.len());
+
+        let points: Vec<PointInsert> = prepared_chunks
+            .into_iter()
+            .zip(embeddings.into_iter())
+            .map(|(chunk, vector)| PointInsert {
+                text: chunk.text,
+                chunk_hash: chunk.chunk_hash,
+                vector,
+            })
+            .collect();
+
+        let overrides = metadata.into_overrides();
+        let IndexSummary { inserted, updated } = self
+            .qdrant_service
+            .index_points(collection_name, points, &overrides)
             .await?;
 
-        self.qdrant_service
-            .index_points(collection_name, chunks, embeddings)
-            .await?;
+        let chunk_count = inserted + updated;
 
         self.metrics
             .record_document(chunk_count as u64, chunk_size as u64);
@@ -145,12 +177,18 @@ impl ProcessingService {
             collection = collection_name,
             chunks = chunk_count,
             chunk_size,
+            inserted,
+            updated,
+            skipped_duplicates,
             "Document indexed"
         );
 
         Ok(ProcessingOutcome {
             chunk_count,
             chunk_size,
+            inserted,
+            updated,
+            skipped_duplicates,
         })
     }
 
@@ -216,6 +254,114 @@ impl ProcessingService {
     /// Callers can expose the snapshot through diagnostics endpoints or dashboards.
     pub fn metrics_snapshot(&self) -> MetricsSnapshot {
         self.metrics.snapshot()
+    }
+}
+
+/// Optional metadata passed along with a `push` request.
+#[derive(Debug, Default, Clone)]
+pub struct IngestMetadata {
+    /// Optional project identifier grouped under the memory payload.
+    pub project_id: Option<String>,
+    /// Optional memory classification (`episodic`/`semantic`/`procedural`).
+    pub memory_type: Option<String>,
+    /// Optional set of tags to persist for payload filtering.
+    pub tags: Option<Vec<String>>,
+    /// Optional URI describing the source document for traceability.
+    pub source_uri: Option<String>,
+}
+
+impl IngestMetadata {
+    fn into_overrides(self) -> PayloadOverrides {
+        PayloadOverrides {
+            project_id: sanitize_project_id(self.project_id),
+            memory_type: sanitize_memory_type(self.memory_type),
+            tags: sanitize_tags(self.tags),
+            source_uri: sanitize_string(self.source_uri),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedChunk {
+    text: String,
+    chunk_hash: String,
+}
+
+fn dedupe_chunks(chunks: Vec<String>) -> (Vec<PreparedChunk>, usize) {
+    let mut seen = HashSet::new();
+    let mut prepared = Vec::new();
+    let mut skipped = 0;
+
+    for text in chunks {
+        if text.trim().is_empty() {
+            continue;
+        }
+        let hash = compute_chunk_hash(&text);
+        if seen.insert(hash.clone()) {
+            prepared.push(PreparedChunk {
+                text,
+                chunk_hash: hash,
+            });
+        } else {
+            skipped += 1;
+        }
+    }
+
+    (prepared, skipped)
+}
+
+fn sanitize_string(value: Option<String>) -> Option<String> {
+    value.and_then(|input| {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn sanitize_project_id(value: Option<String>) -> Option<String> {
+    sanitize_string(value)
+}
+
+fn sanitize_memory_type(value: Option<String>) -> Option<String> {
+    sanitize_string(value).and_then(|mut text| {
+        let normalized = text.to_lowercase();
+        match normalized.as_str() {
+            "episodic" | "semantic" | "procedural" => {
+                if text != normalized {
+                    text = normalized;
+                }
+                Some(text)
+            }
+            _ => {
+                tracing::warn!(memory_type = %normalized, "Ignoring unsupported memory type override");
+                None
+            }
+        }
+    })
+}
+
+fn sanitize_tags(tags: Option<Vec<String>>) -> Option<Vec<String>> {
+    let mut seen = HashSet::new();
+    let mut cleaned = Vec::new();
+
+    for tag in tags.unwrap_or_default() {
+        let trimmed = tag.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = trimmed.to_string();
+        if seen.insert(normalized.clone()) {
+            cleaned.push(normalized);
+        }
+    }
+
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
     }
 }
 
@@ -390,8 +536,9 @@ fn chunk_text_with_counter(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChunkingError, build_tiktoken_counter, chunk_text, chunk_text_with_counter,
-        default_token_counter, determine_chunk_size,
+        ChunkingError, build_tiktoken_counter, chunk_text, chunk_text_with_counter, dedupe_chunks,
+        default_token_counter, determine_chunk_size, sanitize_memory_type, sanitize_project_id,
+        sanitize_tags,
     };
     use crate::config::EmbeddingProvider;
 
@@ -464,5 +611,53 @@ mod tests {
 
         let mini_chunk = determine_chunk_size(None, EmbeddingProvider::Ollama, "all-minilm-l6-v2");
         assert_eq!(mini_chunk, 256);
+    }
+
+    #[test]
+    fn dedupe_chunks_removes_duplicates_and_counts_skips() {
+        let chunks = vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "alpha".to_string(),
+            "beta".to_string(),
+        ];
+        let (deduped, skipped) = dedupe_chunks(chunks);
+        let texts: Vec<_> = deduped.iter().map(|chunk| chunk.text.as_str()).collect();
+        assert_eq!(texts.len(), 2);
+        assert_eq!(skipped, 2);
+        assert!(texts.contains(&"alpha"));
+        assert!(texts.contains(&"beta"));
+        assert_ne!(deduped[0].chunk_hash, deduped[1].chunk_hash);
+    }
+
+    #[test]
+    fn sanitize_memory_type_normalizes_and_filters_invalid() {
+        let episodic = sanitize_memory_type(Some("Episodic".into()));
+        assert_eq!(episodic.as_deref(), Some("episodic"));
+        let invalid = sanitize_memory_type(Some("unknown".into()));
+        assert!(invalid.is_none());
+    }
+
+    #[test]
+    fn sanitize_project_id_trims_and_drops_empty() {
+        assert_eq!(
+            sanitize_project_id(Some("  proj  ".into())),
+            Some("proj".into())
+        );
+        assert!(sanitize_project_id(Some("   ".into())).is_none());
+    }
+
+    #[test]
+    fn sanitize_tags_uniquifies_and_trims() {
+        let tags = sanitize_tags(Some(vec![
+            "alpha".into(),
+            " beta".into(),
+            "alpha".into(),
+            "".into(),
+        ]));
+        assert_eq!(tags.as_ref().map(|t| t.len()), Some(2));
+        let values = tags.unwrap();
+        assert!(values.contains(&"alpha".into()));
+        assert!(values.contains(&"beta".into()));
     }
 }
