@@ -1,6 +1,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Thread-safe counters describing ingestion activity.
+///
+/// The struct intentionally stays minimal—just atomic counters—so it can be cloned freely and
+/// queried without holding locks.  The metrics surface already exposes the most recent chunk size
+/// so front-ends can teach how the automatic sizing behaves over time.
 #[derive(Default)]
 pub struct CodeMetrics {
     documents_indexed: AtomicU64,
@@ -15,6 +19,10 @@ impl CodeMetrics {
     }
 
     /// Record a processed document and the number of chunks produced for it.
+    ///
+    /// The caller supplies the number of chunks and the chunk size used for the ingestion.  We
+    /// capture the chunk size so diagnostics can show how the automatic heuristics evolve when
+    /// different embedding models are configured.
     pub fn record_document(&self, chunk_count: u64, chunk_size: u64) {
         self.documents_indexed.fetch_add(1, Ordering::Relaxed);
         self.chunks_indexed
@@ -45,6 +53,9 @@ impl CodeMetrics {
 }
 
 /// Immutable view of ingestion counters used for reporting.
+///
+/// Exposed through both the HTTP `/metrics` endpoint and the MCP `metrics` tool so that editors
+/// and dashboards can display ingestion activity without depending on interior mutability.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct MetricsSnapshot {
     /// Number of documents that have been indexed since startup.

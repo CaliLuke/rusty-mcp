@@ -42,14 +42,21 @@ pub enum ProcessingError {
     Indexing(#[from] QdrantError),
 }
 
-/// High-level orchestration of chunking, embedding, and indexing.
+/// Coordinates the full ingestion pipeline: semantic chunking, embedding, and Qdrant writes.
+///
+/// The service owns long-lived handles to the embedding client, Qdrant transport, and metrics
+/// registry so that both the HTTP surface and the MCP tools reuse the same components.
+/// Construct the service once near process start and share it through an `Arc`.
 pub struct ProcessingService {
     embedding_client: Box<dyn EmbeddingClient + Send + Sync>,
     qdrant_service: QdrantService,
     metrics: Arc<CodeMetrics>,
 }
 
-/// Result of a successful document ingestion.
+/// Summary of a completed ingestion produced by [`ProcessingService::process_and_index`].
+///
+/// Returning a structured outcome keeps the public API small while still giving callers
+/// insight into how the automatic chunk-size heuristics behaved for the most recent request.
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessingOutcome {
     /// Number of chunks produced for the document.
@@ -60,6 +67,9 @@ pub struct ProcessingOutcome {
 
 impl ProcessingService {
     /// Build a new processing service, initializing backing services as needed.
+    ///
+    /// This eagerly establishes a Qdrant connection, ensures the default collection exists,
+    /// and constructs the embedding client referenced by future ingestion calls.
     pub async fn new() -> Self {
         let config = get_config();
         tracing::info!("Initializing embedding client");
@@ -81,7 +91,11 @@ impl ProcessingService {
         }
     }
 
-    /// Chunk, embed, and index a document, returning the produced chunk count.
+    /// Chunk, embed, and index a document.
+    ///
+    /// Text is split using model-aware chunk sizes, embedded via the configured provider, and
+    /// flushed to Qdrant in a single batch.  The structured [`ProcessingOutcome`] reports how
+    /// many chunks were generated and which chunk size heuristic was applied.
     pub async fn process_and_index(
         &self,
         collection_name: &str,
@@ -134,6 +148,9 @@ impl ProcessingService {
     }
 
     /// Ensure that the target collection exists within Qdrant.
+    ///
+    /// This helper is idempotent; it only issues a creation call if Qdrant reports the
+    /// collection as missing.
     pub async fn ensure_collection(&self, collection_name: &str) -> Result<(), ProcessingError> {
         let config = get_config();
         let vector_size = config.embedding_dimension as u64;
@@ -146,7 +163,10 @@ impl ProcessingService {
             })
     }
 
-    /// Create a new collection (or upsert an existing one) with the desired vector size.
+    /// Create or resize a collection with the desired vector size.
+    ///
+    /// When `vector_size` is omitted the service falls back to the embedding dimension from
+    /// configuration, keeping Qdrant and the embedding provider in sync.
     pub async fn create_collection(
         &self,
         collection_name: &str,
@@ -179,6 +199,8 @@ impl ProcessingService {
     }
 
     /// Return the current ingestion metrics snapshot.
+    ///
+    /// Callers can expose the snapshot through diagnostics endpoints or dashboards.
     pub fn metrics_snapshot(&self) -> MetricsSnapshot {
         self.metrics.snapshot()
     }
