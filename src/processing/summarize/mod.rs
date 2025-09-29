@@ -1,5 +1,13 @@
 //! Helper routines for the summarization pipeline.
 
+pub(crate) mod idempotency;
+pub(crate) mod io;
+pub(crate) mod strategy;
+
+pub(crate) use idempotency::{find_existing_summary, idempotency_tag};
+pub(crate) use io::{fetch_episodic_items, persist_semantic_summary};
+pub(crate) use strategy::select_summary_strategy;
+
 use crate::processing::types::SearchTimeRange;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;

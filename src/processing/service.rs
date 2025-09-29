@@ -14,15 +14,14 @@ use crate::{
         },
     },
     qdrant::{self, IndexSummary, PointInsert, QdrantService},
-    summarization::{SummarizationRequest as LlmSummarizationRequest, get_summarization_client},
 };
 use async_trait::async_trait;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::summarize::{
-    EpisodicMemory, build_abstractive_prompt, build_extractive_summary, compute_summary_key,
-    sort_memories,
+    compute_summary_key, fetch_episodic_items, find_existing_summary, idempotency_tag,
+    persist_semantic_summary, select_summary_strategy,
 };
 use super::types::SearchTimeRange as ProcSearchTimeRange;
 
@@ -65,32 +64,45 @@ pub trait ProcessingApi: Send + Sync {
 impl ProcessingService {
     /// Build a new processing service, initializing backing services as needed.
     pub async fn new() -> Self {
-        let config = get_config();
+        let service = Self::try_new().expect("Failed to construct processing service");
+        service
+            .init()
+            .await
+            .expect("Failed to initialize processing service");
+        service
+    }
+
+    /// Build a processing service without performing async initialization.
+    pub fn try_new() -> Result<Self, ProcessingError> {
         tracing::info!("Initializing embedding client");
         let embedding_client = get_embedding_client();
         tracing::info!("Embedding client initialized");
-        let qdrant_service = QdrantService::new().expect("Failed to connect to Qdrant");
+        let qdrant_service = QdrantService::new()?;
+
+        Ok(Self {
+            embedding_client,
+            qdrant_service,
+            metrics: Arc::new(CodeMetrics::new()),
+        })
+    }
+
+    /// Perform asynchronous initialization such as ensuring Qdrant collections.
+    pub async fn init(&self) -> Result<(), ProcessingError> {
+        let config = get_config();
         let vector_size = config.embedding_dimension as u64;
         tracing::debug!(
             collection = %config.qdrant_collection_name,
             vector_size,
             "Ensuring primary collection"
         );
-        qdrant_service
+        self.qdrant_service
             .create_collection_if_not_exists(&config.qdrant_collection_name, vector_size)
-            .await
-            .expect("Failed to ensure Qdrant collection exists");
-        qdrant_service
+            .await?;
+        self.qdrant_service
             .ensure_payload_indexes(&config.qdrant_collection_name)
-            .await
-            .expect("Failed to ensure Qdrant payload indexes");
+            .await?;
         tracing::debug!(collection = %config.qdrant_collection_name, "Primary collection ready");
-
-        Self {
-            embedding_client,
-            qdrant_service,
-            metrics: Arc::new(CodeMetrics::new()),
-        }
+        Ok(())
     }
 
     /// Chunk, embed, and index a document.
@@ -377,38 +389,16 @@ impl ProcessingService {
         };
         let filter = qdrant::build_search_filter(&filter_args);
 
-        // Scroll payloads (id + payload) and map into episodic items
-        let fields = serde_json::json!(["text", "timestamp"]);
-        let mut items = self
-            .qdrant_service
-            .scroll_payloads_with_ids(&collection, fields, filter)
-            .await
-            .map_err(SummarizeError::Qdrant)?
-            .into_iter()
-            .filter_map(|(id, payload)| {
-                let text = payload
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let timestamp = payload
-                    .get("timestamp")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if text.trim().is_empty() {
-                    None
-                } else {
-                    Some(EpisodicMemory::new(id, text, timestamp))
-                }
-            })
-            .collect::<Vec<_>>();
-
-        // Sort chronologically and cap by limit
-        sort_memories(&mut items);
         let limit = request.limit.unwrap_or(50);
-        if items.len() > limit {
-            items.truncate(limit);
-        }
+        let items = fetch_episodic_items(
+            &self.qdrant_service,
+            &collection,
+            serde_json::json!(["text", "timestamp"]),
+            filter,
+            limit,
+        )
+        .await
+        .map_err(SummarizeError::Qdrant)?;
 
         if items.is_empty() {
             return Err(SummarizeError::EmptyResult);
@@ -425,24 +415,16 @@ impl ProcessingService {
         );
 
         // Idempotency: check for existing summary via tag summary:<hash>
-        let idempotency_tag = format!("summary:{summary_key}");
-        let existing_filter = qdrant::build_search_filter(&qdrant::SearchFilterArgs {
-            project_id: request.project_id.clone(),
-            memory_type: Some("semantic".into()),
-            tags: Some(vec![idempotency_tag.clone()]),
-            time_range: None,
-        });
-        let existing = self
-            .qdrant_service
-            .scroll_payloads_with_ids(&collection, serde_json::json!(["text"]), existing_filter)
-            .await
-            .map_err(SummarizeError::Qdrant)?;
-        if let Some((existing_id, payload)) = existing.into_iter().next() {
-            let summary_text = payload
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        let idempotency_tag = idempotency_tag(&summary_key);
+        if let Some((existing_id, summary_text)) = find_existing_summary(
+            &self.qdrant_service,
+            &collection,
+            request.project_id.as_deref(),
+            &idempotency_tag,
+        )
+        .await
+        .map_err(SummarizeError::Qdrant)?
+        {
             return Ok(SummarizeOutcome {
                 summary: summary_text,
                 source_memory_ids,
@@ -453,73 +435,12 @@ impl ProcessingService {
             });
         }
 
-        // Choose summarization strategy
-        let mut chosen_strategy = request.strategy.clone().unwrap_or(SummarizeStrategy::Auto);
-        let mut provider_str = request.provider.clone();
-        let mut model_str = request.model.clone();
-
-        let mut summary_text = String::new();
-        if matches!(
-            chosen_strategy,
-            SummarizeStrategy::Auto | SummarizeStrategy::Abstractive
-        ) {
-            // Try abstractive path if provider active
-            if matches!(
-                config.summarization_provider,
-                crate::config::SummarizationProvider::Ollama
-            ) {
-                if model_str.is_none() {
-                    model_str = config.summarization_model.clone();
-                }
-                if provider_str.is_none() {
-                    provider_str = Some("ollama".into());
-                }
-                if let (Some(model), Some(client)) = (model_str.clone(), get_summarization_client())
-                {
-                    let prompt = build_abstractive_prompt(
-                        request.project_id.as_deref().unwrap_or("default"),
-                        &ProcSearchTimeRange {
-                            start: request.time_range.start.clone(),
-                            end: request.time_range.end.clone(),
-                        },
-                        request.max_words.unwrap_or(config.summarization_max_words),
-                        &items,
-                    );
-                    match client
-                        .generate_summary(LlmSummarizationRequest {
-                            model,
-                            prompt,
-                            max_words: request.max_words.unwrap_or(config.summarization_max_words),
-                        })
-                        .await
-                    {
-                        Ok(text) => {
-                            summary_text = text;
-                            chosen_strategy = SummarizeStrategy::Abstractive;
-                        }
-                        Err(error) => {
-                            tracing::warn!(error = %error, "Abstractive summarization failed; falling back to extractive");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Extractive fallback or selection
-        if summary_text.is_empty() {
-            summary_text = build_extractive_summary(
-                &items,
-                request.max_words.unwrap_or(config.summarization_max_words),
-            );
-            if matches!(chosen_strategy, SummarizeStrategy::Auto) {
-                chosen_strategy = SummarizeStrategy::Extractive;
-            }
-        }
+        let strategy = select_summary_strategy(&request, &items, config).await;
 
         // Embed and upsert the summary as semantic
         let vectors = self
             .embedding_client
-            .generate_embeddings(vec![summary_text.clone()])
+            .generate_embeddings(vec![strategy.summary_text.clone()])
             .await
             .map_err(SummarizeError::Embedding)?;
         let vector = vectors.into_iter().next().ok_or_else(|| {
@@ -528,10 +449,10 @@ impl ProcessingService {
             ))
         })?;
 
-        let chunk_hash = qdrant::compute_chunk_hash(&summary_text);
+        let chunk_hash = qdrant::compute_chunk_hash(&strategy.summary_text);
         let mut tags = request.tags.clone().unwrap_or_default();
         tags.push("summary".into());
-        tags.push(format!("summary:{summary_key}"));
+        tags.push(idempotency_tag.clone());
 
         let overrides = qdrant::types::PayloadOverrides {
             project_id: request.project_id.clone(),
@@ -552,47 +473,26 @@ impl ProcessingService {
                 }
             })?;
 
-        self.qdrant_service
-            .index_points(
-                &collection,
-                vec![PointInsert {
-                    text: summary_text.clone(),
-                    chunk_hash,
-                    vector,
-                }],
-                &overrides,
-            )
-            .await
-            .map_err(SummarizeError::Qdrant)?;
-
-        // Resolve ID of the inserted summary by scanning for the idempotency tag
-        let resolve = self
-            .qdrant_service
-            .scroll_payloads_with_ids(
-                &collection,
-                serde_json::json!(["text"]),
-                qdrant::build_search_filter(&qdrant::SearchFilterArgs {
-                    project_id: request.project_id.clone(),
-                    memory_type: Some("semantic".into()),
-                    tags: Some(vec![idempotency_tag.clone()]),
-                    time_range: None,
-                }),
-            )
-            .await
-            .map_err(SummarizeError::Qdrant)?;
-        let upserted_memory_id = resolve
-            .into_iter()
-            .map(|(id, _)| id)
-            .next()
-            .unwrap_or_default();
+        let upserted_memory_id = persist_semantic_summary(
+            &self.qdrant_service,
+            &collection,
+            &strategy.summary_text,
+            vector,
+            chunk_hash,
+            &overrides,
+            request.project_id.as_deref(),
+            &idempotency_tag,
+        )
+        .await
+        .map_err(SummarizeError::Qdrant)?;
 
         Ok(SummarizeOutcome {
-            summary: summary_text,
+            summary: strategy.summary_text,
             source_memory_ids,
             upserted_memory_id,
-            strategy_used: strategy_to_label(&Some(chosen_strategy)),
-            provider: provider_str,
-            model: model_str,
+            strategy_used: strategy_to_label(&Some(strategy.strategy)),
+            provider: strategy.provider,
+            model: strategy.model,
         })
     }
 }

@@ -16,6 +16,14 @@ static INIT: OnceCell<()> = OnceCell::const_new();
 static MOCK_SERVER: OnceCell<&'static MockServer> = OnceCell::const_new();
 static MOCK_HANDLES: OnceCell<Vec<Mock<'static>>> = OnceCell::const_new();
 
+macro_rules! test_log {
+    ($($arg:tt)*) => {
+        if std::env::var("RUSTY_MEM_TEST_LOG").is_ok() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 fn set_env(key: &str, value: &str) {
     // SAFETY: Tests run in a single process and establish deterministic configuration upfront.
     unsafe { std::env::set_var(key, value) }
@@ -37,14 +45,14 @@ struct TestHarness {
 
 impl TestHarness {
     async fn new() -> Self {
-        eprintln!("[harness] init start");
+        test_log!("[harness] init start");
         INIT.get_or_init(|| async {
-            eprintln!("[harness:init] starting mock server");
+            test_log!("[harness:init] starting mock server");
             let mock_server_owned = MockServer::start_async().await;
             let mock_server = Box::leak(Box::new(mock_server_owned));
             let base_url = mock_server.base_url();
 
-            eprintln!("[harness:init] configuring environment");
+            test_log!("[harness:init] configuring environment");
             set_env("QDRANT_URL", &base_url);
             set_env("QDRANT_COLLECTION_NAME", "rusty-mem");
             set_env("EMBEDDING_PROVIDER", "openai");
@@ -52,13 +60,14 @@ impl TestHarness {
             set_env("EMBEDDING_DIMENSION", "768");
             set_env("TEXT_SPLITTER_CHUNK_SIZE", "4");
             set_env("OLLAMA_URL", "http://127.0.0.1:11434");
+            set_env("RUST_LOG", "warn");
 
             MOCK_SERVER.set(mock_server).ok();
 
             let server = MOCK_SERVER.get().expect("mock server initialized");
             let collections_regex = Regex::new(r"^/collections/").unwrap();
 
-            eprintln!("[harness:init] registering http mocks");
+            test_log!("[harness:init] registering http mocks");
             let mocks: Vec<Mock<'static>> = vec![
                 server
                     .mock_async(|when, then| {
@@ -147,16 +156,16 @@ impl TestHarness {
 
             MOCK_HANDLES.set(mocks).ok();
 
-            eprintln!("[harness:init] initializing config & logging");
+            test_log!("[harness:init] initializing config & logging");
             config::init_config();
             logging::init_tracing();
-            eprintln!("[harness:init] ready");
+            test_log!("[harness:init] ready");
         })
         .await;
 
-        eprintln!("[harness] building processing service");
+        test_log!("[harness] building processing service");
         let processing = Arc::new(ProcessingService::new().await);
-        eprintln!("[harness] processing ready");
+        test_log!("[harness] processing ready");
         let server = RustyMemMcpServer::new(processing);
 
         let (client_stream, server_stream) = tokio::io::duplex(16 * 1024);
@@ -173,23 +182,23 @@ impl TestHarness {
         let server =
             serve_directly::<RoleServer, _, _, _, _>(server, server_transport, Some(client_info));
 
-        eprintln!("[harness] starting client service");
+        test_log!("[harness] starting client service");
         let service = serve_directly::<RoleClient, _, _, _, _>(
             client_handler,
             client_transport,
             Some(server_info),
         );
-        eprintln!("[harness] client service ready");
+        test_log!("[harness] client service ready");
 
         Self { service, server }
     }
 
     async fn shutdown(self) {
-        eprintln!("[harness] shutdown start");
+        test_log!("[harness] shutdown start");
         let Self { service, server } = self;
         let _ = service.cancel().await;
         let _ = server.cancel().await;
-        eprintln!("[harness] shutdown complete");
+        test_log!("[harness] shutdown complete");
     }
 }
 
