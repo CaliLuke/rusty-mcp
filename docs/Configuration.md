@@ -24,6 +24,9 @@ Rusty Memory reads its configuration from environment variables once at startup.
 | `SERVER_PORT`                     | Optional fixed HTTP port. When unset, the server picks the first free port in `4100-4199`.                         | `4123`                            |
 | `RUSTY_MEM_LOG_FILE`              | Optional absolute path for structured logs. When omitted, logs go to `logs/rusty-mem.log`.                         | `/Users/you/rusty-mem.log`        |
 | `RUST_LOG`                        | Standard Rust logging filter if you need more or less verbosity.                                                   | `rusty_mem=debug,tower_http=info` |
+| `SUMMARIZATION_PROVIDER`          | Summarization backend. `ollama` enables local abstractive summaries; `none` forces extractive fallback.            | `ollama`                          |
+| `SUMMARIZATION_MODEL`             | Model identifier for abstractive summarization when provider is `ollama`.                                          | `llama3.1:8b`                     |
+| `SUMMARIZATION_MAX_WORDS`         | Default word budget for summaries when callers omit `max_words`.                                                   | `250`                             |
 
 When the MCP server is running you can call `readResource` on `mcp://rusty-mem/settings` to inspect the effective search defaults and limits that the process is enforcing.
 

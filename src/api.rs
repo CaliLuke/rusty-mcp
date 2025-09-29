@@ -443,6 +443,9 @@ mod tests {
                 search_default_limit: 5,
                 search_max_limit: 50,
                 search_default_score_threshold: 0.25,
+                summarization_provider: crate::config::SummarizationProvider::Ollama,
+                summarization_model: Some("llama".into()),
+                summarization_max_words: 200,
             });
         });
     }

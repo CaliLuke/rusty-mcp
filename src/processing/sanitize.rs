@@ -97,6 +97,8 @@ pub(crate) fn to_payload_overrides(metadata: IngestMetadata) -> PayloadOverrides
         memory_type: sanitize_memory_type(memory_type),
         tags: sanitize_tags(tags),
         source_uri: sanitize_string(source_uri),
+        source_memory_ids: None,
+        summary_key: None,
     }
 }
 

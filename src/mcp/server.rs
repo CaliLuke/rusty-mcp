@@ -59,6 +59,7 @@ impl RustyMemMcpServer {
         let search_description = format!(
             "Semantic search over indexed memories. Provide a short `query_text` plus optional filters (`project_id`/`project`, `memory_type`/`type`, `tags`, `time_range`, `collection`, `limit`/`k`).\n\nUsage policy: Do not paste large documents into prompts; index text with `push` first, then `search` to retrieve. Keep `query_text` concise (<=512 chars).\n\nDefaults: `limit={default_limit}`, `score_threshold={default_threshold}`. Response returns `results`, prompt-ready `context`, and `used_filters`. Example: {{\\n  \\\"query_text\\\": \\\"current architecture plan\\\",\\n  \\\"project_id\\\": \\\"default\\\",\\n  \\\"tags\\\": [\\\"architecture\\\"],\\n  \\\"limit\\\": {default_limit}\\n}}."
         );
+        let summarize_schema = Arc::new(schemas::summarize_input_schema());
         vec![
             Tool {
                 name: Cow::Borrowed("search"),
@@ -133,6 +134,22 @@ impl RustyMemMcpServer {
                 annotations: Some(
                     ToolAnnotations::with_title("Metrics Snapshot")
                         .read_only(true)
+                        .idempotent(true)
+                        .open_world(false),
+                ),
+                icons: None,
+            },
+            Tool {
+                name: Cow::Borrowed("summarize"),
+                title: Some("Summarize Memories".to_string()),
+                description: Some(Cow::Borrowed(
+                    "Consolidate time-bounded episodic memories into a semantic summary. Required: `time_range`. Optional: `project_id`, `memory_type` (default 'episodic'), `tags`, `limit`, `strategy` (auto|abstractive|extractive), `provider`, `model`, `max_words`, `collection`. Produces `summary`, `source_memory_ids`, and `upserted_memory_id` and echoes `used_filters`.",
+                )),
+                input_schema: summarize_schema.clone(),
+                output_schema: None,
+                annotations: Some(
+                    ToolAnnotations::with_title("Summarize Memories")
+                        .destructive(false)
                         .idempotent(true)
                         .open_world(false),
                 ),
@@ -380,6 +397,13 @@ impl ServerHandler for RustyMemMcpServer {
                 "get-collections" => handle_list_collections(&processing).await,
                 "new-collection" => handle_create_collection(&processing, request.arguments).await,
                 "metrics" => handle_metrics(&processing).await,
+                "summarize" => {
+                    crate::mcp::handlers::summarize::handle_summarize(
+                        &processing,
+                        request.arguments,
+                    )
+                    .await
+                }
                 other => Err(McpError::invalid_params(
                     format!("Unknown tool: {other}"),
                     None,

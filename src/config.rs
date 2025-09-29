@@ -11,6 +11,8 @@
 //!   `TEXT_SPLITTER_USE_SAFE_DEFAULTS?`).
 //! - Search ergonomics (`SEARCH_DEFAULT_LIMIT?`, `SEARCH_MAX_LIMIT?`,
 //!   `SEARCH_DEFAULT_SCORE_THRESHOLD?`).
+//! - Summarization (`SUMMARIZATION_PROVIDER?`, `SUMMARIZATION_MODEL?`,
+//!   `SUMMARIZATION_MAX_WORDS?`).
 //! - HTTP server port (`SERVER_PORT?`).
 //!
 //! Most fields are optional with sensible defaults; invalid combinations are flagged early with
@@ -62,6 +64,12 @@ pub struct Config {
     pub search_max_limit: usize,
     /// Default similarity threshold applied when callers omit `score_threshold`.
     pub search_default_score_threshold: f32,
+    /// Summarization provider selection.
+    pub summarization_provider: SummarizationProvider,
+    /// Optional model identifier for abstractive summarization.
+    pub summarization_model: Option<String>,
+    /// Default word budget for summaries.
+    pub summarization_max_words: usize,
 }
 
 /// Supported embedding backends for the processing pipeline.
@@ -72,6 +80,16 @@ pub enum EmbeddingProvider {
     Ollama,
     /// Hosted OpenAI embeddings API.
     OpenAI,
+}
+
+/// Supported summarization backends for abstractive summaries.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SummarizationProvider {
+    /// Disable abstractive summarization; use extractive fallback.
+    None,
+    /// Local Ollama runtime.
+    Ollama,
 }
 
 impl Config {
@@ -143,6 +161,15 @@ impl Config {
             search_default_limit,
             search_max_limit,
             search_default_score_threshold,
+            summarization_provider: load_env_optional("SUMMARIZATION_PROVIDER")
+                .as_deref()
+                .map(|s| match s.to_lowercase().as_str() {
+                    "ollama" => SummarizationProvider::Ollama,
+                    _ => SummarizationProvider::None,
+                })
+                .unwrap_or(SummarizationProvider::None),
+            summarization_model: load_env_optional("SUMMARIZATION_MODEL"),
+            summarization_max_words: load_usize_with_default("SUMMARIZATION_MAX_WORDS", 250)?,
         })
     }
 }
@@ -217,6 +244,9 @@ pub fn init_config() {
         search_default_limit = config.search_default_limit,
         search_max_limit = config.search_max_limit,
         search_default_score_threshold = config.search_default_score_threshold,
+        summarization_provider = ?config.summarization_provider,
+        summarization_model = ?config.summarization_model,
+        summarization_max_words = config.summarization_max_words,
         "Loaded configuration"
     );
     CONFIG.set(config).expect("Failed to set config");

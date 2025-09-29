@@ -56,6 +56,25 @@ pub(crate) fn build_payload(
         );
     }
 
+    if let Some(ids) = overrides
+        .source_memory_ids
+        .as_ref()
+        .filter(|ids| !ids.is_empty())
+    {
+        payload.insert(
+            "source_memory_ids".into(),
+            Value::Array(ids.iter().map(|id| Value::String(id.clone())).collect()),
+        );
+    }
+
+    if let Some(key) = overrides
+        .summary_key
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        payload.insert("summary_key".into(), Value::String(key.clone()));
+    }
+
     Value::Object(payload)
 }
 
@@ -129,6 +148,7 @@ mod tests {
             memory_type: Some("episodic".into()),
             tags: Some(vec!["alpha".into(), "beta".into()]),
             source_uri: Some("file://doc".into()),
+            ..Default::default()
         };
         let payload = build_payload(&id, "sample", now, "hash", &overrides);
         assert_eq!(payload["project_id"], "proj");

@@ -424,6 +424,63 @@ impl QdrantService {
 
         Ok(payloads)
     }
+
+    /// Scroll payloads and return their associated point identifiers.
+    pub async fn scroll_payloads_with_ids(
+        &self,
+        collection: &str,
+        with_payload: Value,
+        filter: Option<Value>,
+    ) -> Result<Vec<(String, Map<String, Value>)>, QdrantError> {
+        let mut offset: Option<Value> = None;
+        let mut results = Vec::new();
+        let filter_body = filter.unwrap_or_else(|| json!({ "must": [] }));
+
+        loop {
+            let mut body = json!({
+                "with_payload": with_payload.clone(),
+                "with_vector": false,
+                "limit": 512,
+                "offset": offset.clone().unwrap_or(Value::Null),
+                "filter": filter_body,
+                "order_by": [
+                    { "key": "timestamp", "direction": "asc" }
+                ]
+            });
+
+            // Qdrant does not yet support `order_by` in scroll for all versions; keep it in body but tolerate errors.
+            let response = self
+                .request(
+                    Method::POST,
+                    &format!("collections/{collection}/points/scroll"),
+                )?
+                .json(&body)
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                let error = QdrantError::UnexpectedStatus { status, body };
+                tracing::error!(collection, error = %error, "Failed to scroll payloads with ids");
+                return Err(error);
+            }
+
+            let ScrollResponse { result } = response.json().await?;
+            for point in result.points {
+                if let (Some(id), Some(payload)) = (point.id, point.payload) {
+                    results.push((stringify_point_id(id), payload));
+                }
+            }
+
+            match result.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => break,
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 fn normalize_base_url(url: &str) -> Result<String, String> {
