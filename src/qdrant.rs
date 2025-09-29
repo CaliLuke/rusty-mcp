@@ -655,9 +655,9 @@ fn stringify_point_id(id: Value) -> String {
         Value::Number(number) => number.to_string(),
         Value::Object(map) => map
             .get("uuid")
-            .and_then(|value| match value {
-                Value::String(uuid) => Some(uuid.clone()),
-                other => Some(other.to_string()),
+            .map(|value| match value {
+                Value::String(uuid) => uuid.clone(),
+                other => other.to_string(),
             })
             .unwrap_or_else(|| Value::Object(map).to_string()),
         Value::Null => String::new(),

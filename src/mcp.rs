@@ -1,9 +1,10 @@
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, sync::Arc};
 
 use crate::{
     config::{EmbeddingProvider, get_config},
     processing::{
-        IngestMetadata, ProcessingService, QdrantHealthSnapshot, SearchRequest, SearchTimeRange,
+        IngestMetadata, ProcessingService, QdrantHealthSnapshot, SearchHit, SearchRequest,
+        SearchTimeRange,
     },
 };
 use rmcp::{
@@ -51,7 +52,7 @@ impl RustyMemMcpServer {
                 name: Cow::Borrowed("search"),
                 title: Some("Search Memories".to_string()),
                 description: Some(Cow::Owned(
-                    "Search stored memories using semantic similarity. Provide `query_text` and optional filters (`project_id`, `memory_type`, `tags`, `time_range`, `collection`). Defaults: `limit=5`, `score_threshold=0.25`. Example: {\n  \"query_text\": \"current architecture plan\",\n  \"project_id\": \"default\",\n  \"tags\": [\"architecture\"],\n  \"limit\": 5\n}.".to_string(),
+                    "Search stored memories using semantic similarity. Provide `query_text` plus optional filters (`project_id`/`project`, `memory_type`/`type`, `tags`, `time_range`, `collection`, `limit`/`k`). Defaults: `limit=5`, `score_threshold=0.25`. Response returns `results`, prompt-ready `context`, and a `used_filters` echo. Example: {\n  \"query_text\": \"current architecture plan\",\n  \"project_id\": \"default\",\n  \"tags\": [\"architecture\"],\n  \"limit\": 5\n}.".to_string(),
                 )),
                 input_schema: search_schema.clone(),
                 output_schema: None,
@@ -342,7 +343,10 @@ impl ServerHandler for RustyMemMcpServer {
                     })))
                 }
                 "search" => {
-                    let args: SearchToolRequest = parse_arguments(request.arguments)?;
+                    let normalized_arguments = normalize_search_arguments(request.arguments);
+                    let mut args: SearchToolRequest = parse_arguments_value(normalized_arguments)?;
+                    args.tags = normalize_tags(args.tags);
+
                     if args.query_text.trim().is_empty() {
                         return Err(McpError::invalid_params(
                             "`query_text` must not be empty",
@@ -368,6 +372,16 @@ impl ServerHandler for RustyMemMcpServer {
                     let limit_value = limit.unwrap_or(SEARCH_DEFAULT_LIMIT).max(1);
                     let threshold_value = score_threshold.unwrap_or(SEARCH_DEFAULT_THRESHOLD);
 
+                    let used_filters = build_used_filters(
+                        &collection_name,
+                        limit_value,
+                        threshold_value,
+                        project_id.as_ref(),
+                        memory_type.as_ref(),
+                        tags.as_ref(),
+                        time_range.as_ref(),
+                    );
+
                     let search_request = SearchRequest {
                         query_text,
                         collection: Some(collection_name.clone()),
@@ -384,40 +398,19 @@ impl ServerHandler for RustyMemMcpServer {
                         .await
                         .map_err(|err| McpError::internal_error(err.to_string(), None))?;
 
-                    let results: Vec<Value> = hits
-                        .into_iter()
-                        .map(|hit| {
-                            let mut item = Map::new();
-                            item.insert("id".into(), Value::String(hit.id));
-                            item.insert("score".into(), json!(hit.score));
-                            if let Some(text) = hit.text {
-                                item.insert("text".into(), Value::String(text));
-                            }
-                            if let Some(project_id) = hit.project_id {
-                                item.insert("project_id".into(), Value::String(project_id));
-                            }
-                            if let Some(memory_type) = hit.memory_type {
-                                item.insert("memory_type".into(), Value::String(memory_type));
-                            }
-                            if let Some(tags) = hit.tags {
-                                item.insert("tags".into(), json!(tags));
-                            }
-                            if let Some(timestamp) = hit.timestamp {
-                                item.insert("timestamp".into(), Value::String(timestamp));
-                            }
-                            if let Some(source_uri) = hit.source_uri {
-                                item.insert("source_uri".into(), Value::String(source_uri));
-                            }
-                            Value::Object(item)
-                        })
-                        .collect();
+                    let (results, context) = format_search_hits(hits);
 
-                    Ok(CallToolResult::structured(json!({
-                        "results": results,
-                        "collection": collection_name,
-                        "limit": limit_value,
-                        "scoreThreshold": threshold_value,
-                    })))
+                    let mut payload = Map::new();
+                    payload.insert("results".into(), Value::Array(results));
+                    payload.insert("collection".into(), Value::String(collection_name));
+                    payload.insert("limit".into(), Value::from(limit_value as u64));
+                    payload.insert("scoreThreshold".into(), json!(threshold_value));
+                    payload.insert("used_filters".into(), Value::Object(used_filters));
+                    if let Some(context_value) = context {
+                        payload.insert("context".into(), Value::String(context_value));
+                    }
+
+                    Ok(CallToolResult::structured(Value::Object(payload)))
                 }
                 "get-collections" => {
                     let collections = processing
@@ -505,7 +498,7 @@ struct SearchToolRequest {
     collection: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct SearchToolTimeRange {
     #[serde(default)]
@@ -527,8 +520,160 @@ fn parse_arguments<T: DeserializeOwned>(arguments: Option<JsonObject>) -> Result
     let value = arguments
         .map(Value::Object)
         .unwrap_or_else(|| Value::Object(JsonObject::new()));
+    parse_arguments_value(value)
+}
+
+fn parse_arguments_value<T: DeserializeOwned>(value: Value) -> Result<T, McpError> {
     serde_json::from_value(value)
         .map_err(|err| McpError::invalid_params(format!("Invalid arguments: {err}"), None))
+}
+
+fn normalize_search_arguments(arguments: Option<JsonObject>) -> Value {
+    let mut map = arguments.unwrap_or_default();
+
+    move_alias(&mut map, "type", "memory_type");
+    move_alias(&mut map, "project", "project_id");
+    move_alias(&mut map, "k", "limit");
+
+    if let Some(tags_value) = map.remove("tags") {
+        match tags_value {
+            Value::String(tag) => {
+                if !tag.trim().is_empty() {
+                    map.insert("tags".into(), Value::Array(vec![Value::String(tag)]));
+                }
+            }
+            Value::Array(items) => {
+                map.insert("tags".into(), Value::Array(items));
+            }
+            other => {
+                map.insert("tags".into(), other);
+            }
+        }
+    }
+
+    Value::Object(map)
+}
+
+fn move_alias(map: &mut JsonObject, alias: &str, canonical: &str) {
+    if let Some(value) = map.remove(alias) {
+        if map.contains_key(canonical) {
+            tracing::debug!(
+                alias = alias,
+                canonical = canonical,
+                "Alias ignored because canonical key provided"
+            );
+        } else {
+            map.insert(canonical.to_string(), value);
+        }
+    }
+}
+
+fn normalize_tags(tags: Option<Vec<String>>) -> Option<Vec<String>> {
+    let mut tags_vec = tags?;
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+
+    for tag in tags_vec.drain(..) {
+        let trimmed = tag.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let prepared = trimmed.to_string();
+        if seen.insert(prepared.clone()) {
+            normalized.push(prepared);
+        }
+    }
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn build_used_filters(
+    collection: &str,
+    limit: usize,
+    score_threshold: f32,
+    project_id: Option<&String>,
+    memory_type: Option<&String>,
+    tags: Option<&Vec<String>>,
+    time_range: Option<&SearchToolTimeRange>,
+) -> Map<String, Value> {
+    let mut filters = Map::new();
+
+    if let Some(project) = project_id {
+        filters.insert("project_id".into(), Value::String(project.clone()));
+    }
+    if let Some(memory) = memory_type {
+        filters.insert("memory_type".into(), Value::String(memory.clone()));
+    }
+    if let Some(tags_value) = tags.filter(|values| !values.is_empty()) {
+        filters.insert("tags".into(), json!(tags_value));
+    }
+    if let Some(range) = time_range {
+        let mut range_map = Map::new();
+        if let Some(start) = range.start.as_ref() {
+            range_map.insert("start".into(), Value::String(start.clone()));
+        }
+        if let Some(end) = range.end.as_ref() {
+            range_map.insert("end".into(), Value::String(end.clone()));
+        }
+        if !range_map.is_empty() {
+            filters.insert("time_range".into(), Value::Object(range_map));
+        }
+    }
+
+    filters.insert("collection".into(), Value::String(collection.to_string()));
+    filters.insert("limit".into(), Value::from(limit as u64));
+    filters.insert("score_threshold".into(), json!(score_threshold));
+
+    filters
+}
+
+fn format_search_hits(hits: Vec<SearchHit>) -> (Vec<Value>, Option<String>) {
+    let mut results = Vec::with_capacity(hits.len());
+    let mut context_segments = Vec::new();
+
+    for hit in hits {
+        let mut item = Map::new();
+        let id = hit.id;
+        item.insert("id".into(), Value::String(id.clone()));
+        item.insert("score".into(), json!(hit.score));
+
+        if let Some(text) = hit.text {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                context_segments.push(format!("{trimmed} [{id}]"));
+            }
+            item.insert("text".into(), Value::String(text));
+        }
+        if let Some(project_id) = hit.project_id {
+            item.insert("project_id".into(), Value::String(project_id));
+        }
+        if let Some(memory_type) = hit.memory_type {
+            item.insert("memory_type".into(), Value::String(memory_type));
+        }
+        if let Some(tags) = hit.tags {
+            item.insert("tags".into(), json!(tags));
+        }
+        if let Some(timestamp) = hit.timestamp {
+            item.insert("timestamp".into(), Value::String(timestamp));
+        }
+        if let Some(source_uri) = hit.source_uri {
+            item.insert("source_uri".into(), Value::String(source_uri));
+        }
+
+        results.push(Value::Object(item));
+    }
+
+    let context = if context_segments.is_empty() {
+        None
+    } else {
+        Some(context_segments.join("\n"))
+    };
+
+    (results, context)
 }
 
 fn serialize_json<T: Serialize>(value: &T, context_uri: &str) -> String {
@@ -689,6 +834,7 @@ fn search_input_schema() -> JsonObject {
         "description".into(),
         Value::String("Filter results to a specific project_id".into()),
     );
+    project_schema.insert("default".into(), Value::String("default".into()));
     properties.insert("project_id".into(), Value::Object(project_schema));
 
     let mut memory_schema = JsonObject::new();
@@ -770,7 +916,30 @@ fn search_input_schema() -> JsonObject {
     );
     properties.insert("collection".into(), Value::Object(collection_schema));
 
-    finalize_object_schema(properties, &["query_text"])
+    let mut schema = finalize_object_schema(properties, &["query_text"]);
+
+    let example_canonical = json!({
+        "query_text": "current architecture plan",
+        "project_id": "default",
+        "memory_type": "semantic",
+        "tags": ["architecture"],
+        "limit": 5
+    });
+
+    let example_aliases = json!({
+        "query_text": "error budget policy",
+        "project": "site",
+        "type": "procedural",
+        "tags": "sre",
+        "k": 3
+    });
+
+    schema.insert(
+        "examples".into(),
+        Value::Array(vec![example_canonical, example_aliases]),
+    );
+
+    schema
 }
 
 fn empty_object_schema() -> JsonObject {
@@ -806,6 +975,7 @@ fn finalize_object_schema(properties: JsonObject, required: &[&str]) -> JsonObje
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::processing::SearchHit;
     use serde_json::Value;
 
     #[test]
@@ -842,5 +1012,147 @@ mod tests {
         assert_eq!(value["embedding"]["dimension"], 768);
         assert_eq!(value["qdrant"]["reachable"], false);
         assert_eq!(value["qdrant"]["error"], "connection refused");
+    }
+
+    #[test]
+    fn normalize_search_arguments_supports_aliases_and_tags() {
+        let mut raw = JsonObject::new();
+        raw.insert("query_text".into(), Value::String("demo".into()));
+        raw.insert("type".into(), Value::String("semantic".into()));
+        raw.insert("memory_type".into(), Value::String("episodic".into()));
+        raw.insert("project".into(), Value::String("alpha".into()));
+        raw.insert("k".into(), Value::from(3));
+        raw.insert("tags".into(), Value::String(" docs ".into()));
+
+        let normalized = normalize_search_arguments(Some(raw));
+        let mut request: SearchToolRequest =
+            parse_arguments_value(normalized).expect("normalized arguments parse");
+        request.tags = normalize_tags(request.tags);
+
+        assert_eq!(request.memory_type.as_deref(), Some("episodic"));
+        assert_eq!(request.project_id.as_deref(), Some("alpha"));
+        assert_eq!(request.limit, Some(3));
+        assert_eq!(request.tags, Some(vec!["docs".into()]));
+    }
+
+    #[test]
+    fn build_used_filters_includes_defaults_and_filters() {
+        let project = "alpha".to_string();
+        let memory = "semantic".to_string();
+        let tags = vec!["docs".to_string(), "api".to_string()];
+        let time_range = SearchToolTimeRange {
+            start: Some("2024-01-01T00:00:00Z".into()),
+            end: None,
+        };
+
+        let filters = build_used_filters(
+            "rusty",
+            7,
+            0.4,
+            Some(&project),
+            Some(&memory),
+            Some(&tags),
+            Some(&time_range),
+        );
+
+        assert_eq!(
+            filters.get("project_id").and_then(Value::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            filters.get("memory_type").and_then(Value::as_str),
+            Some("semantic")
+        );
+        assert_eq!(
+            filters.get("collection").and_then(Value::as_str),
+            Some("rusty")
+        );
+        assert_eq!(filters.get("limit").and_then(Value::as_u64), Some(7));
+        let score_value = filters
+            .get("score_threshold")
+            .and_then(Value::as_f64)
+            .expect("score");
+        assert!((score_value - 0.4).abs() < 1e-6);
+        let tag_values: Vec<&str> = filters
+            .get("tags")
+            .and_then(Value::as_array)
+            .expect("tags array")
+            .iter()
+            .map(|value| value.as_str().expect("tag string"))
+            .collect();
+        assert_eq!(tag_values, ["docs", "api"]);
+        let time_value = filters
+            .get("time_range")
+            .and_then(Value::as_object)
+            .expect("time_range object");
+        assert_eq!(
+            time_value.get("start"),
+            Some(&Value::String("2024-01-01T00:00:00Z".into()))
+        );
+        assert!(time_value.get("end").is_none());
+    }
+
+    #[test]
+    fn format_search_hits_builds_context_with_citations() {
+        let hits = vec![
+            SearchHit {
+                id: "a1".into(),
+                score: 0.9,
+                text: Some("First snippet".into()),
+                project_id: Some("alpha".into()),
+                memory_type: None,
+                tags: None,
+                timestamp: None,
+                source_uri: None,
+            },
+            SearchHit {
+                id: "b2".into(),
+                score: 0.7,
+                text: Some("".into()),
+                project_id: None,
+                memory_type: None,
+                tags: None,
+                timestamp: None,
+                source_uri: None,
+            },
+            SearchHit {
+                id: "c3".into(),
+                score: 0.8,
+                text: Some("Second snippet".into()),
+                project_id: None,
+                memory_type: Some("semantic".into()),
+                tags: Some(vec!["docs".into()]),
+                timestamp: Some("2024-03-01T00:00:00Z".into()),
+                source_uri: Some("file://note".into()),
+            },
+        ];
+
+        let (results, context) = format_search_hits(hits);
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            context,
+            Some("First snippet [a1]\nSecond snippet [c3]".into())
+        );
+
+        let ids: Vec<&str> = results
+            .iter()
+            .map(|value| value["id"].as_str().expect("id string"))
+            .collect();
+        assert_eq!(ids, vec!["a1", "b2", "c3"]);
+    }
+
+    #[test]
+    fn search_input_schema_includes_examples_and_defaults() {
+        let schema = search_input_schema();
+        assert_eq!(schema["properties"]["project_id"]["default"], "default");
+        assert_eq!(schema["additionalProperties"], false);
+
+        let memory_enum = schema["properties"]["memory_type"]["enum"].as_array();
+        assert!(memory_enum.is_some());
+
+        let examples = schema["examples"].as_array().expect("examples array");
+        assert_eq!(examples.len(), 2);
+        assert!(examples.iter().any(|value| value["project"] == "site"));
     }
 }
