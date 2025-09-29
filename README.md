@@ -1,8 +1,8 @@
 # Rusty Memory MCP
 
 [![Crates.io](https://img.shields.io/crates/v/rustymcp.svg?style=flat-square)](https://crates.io/crates/rustymcp)
-[![docs.rs](https://docs.rs/rustymcp/badge.svg)](https://docs.rs/rustymcp/0.1.1)
-[![Release](https://img.shields.io/badge/release-v0.1.1-blue?style=flat-square)](https://github.com/CaliLuke/rusty-mcp/releases/tag/v0.1.1)
+[![docs.rs](https://docs.rs/rustymcp/badge.svg)](https://docs.rs/rustymcp/0.2.0)
+[![Release](https://img.shields.io/badge/release-v0.2.0-blue?style=flat-square)](https://github.com/CaliLuke/rusty-mcp/releases/tag/v0.2.0)
 [![CI](https://github.com/CaliLuke/rusty-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/CaliLuke/rusty-mcp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue?style=flat-square)](LICENSE)
 
