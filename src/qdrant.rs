@@ -58,6 +58,39 @@ pub struct PointInsert {
     pub vector: Vec<f32>,
 }
 
+/// Filters that can be applied to Qdrant search queries.
+#[derive(Debug, Default, Clone)]
+pub struct SearchFilterArgs {
+    /// Exact match constraint for the `project_id` payload field.
+    pub project_id: Option<String>,
+    /// Exact match constraint for the `memory_type` payload field.
+    pub memory_type: Option<String>,
+    /// Contains-any constraint for the `tags` payload field.
+    pub tags: Option<Vec<String>>,
+    /// Timestamp boundaries applied to the `timestamp` payload field.
+    pub time_range: Option<SearchTimeRange>,
+}
+
+/// Inclusive timestamp boundaries expressed in RFC3339.
+#[derive(Debug, Default, Clone)]
+pub struct SearchTimeRange {
+    /// Inclusive start timestamp (`gte`).
+    pub start: Option<String>,
+    /// Inclusive end timestamp (`lte`).
+    pub end: Option<String>,
+}
+
+/// Scored payload returned by Qdrant queries.
+#[derive(Debug, Clone)]
+pub struct ScoredPoint {
+    /// Identifier assigned to the vector.
+    pub id: String,
+    /// Similarity score computed by Qdrant.
+    pub score: f32,
+    /// Optional payload associated with the vector.
+    pub payload: Option<Map<String, Value>>,
+}
+
 /// Summary describing how Qdrant applied an indexing request.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IndexSummary {
@@ -247,6 +280,78 @@ impl QdrantService {
         })
     }
 
+    /// Perform a similarity search against a collection, returning scored payloads.
+    pub async fn search_points(
+        &self,
+        collection_name: &str,
+        vector: Vec<f32>,
+        filter: Option<Value>,
+        limit: usize,
+        score_threshold: Option<f32>,
+        using: Option<String>,
+    ) -> Result<Vec<ScoredPoint>, QdrantError> {
+        let mut body = json!({
+            "query": vector,
+            "limit": limit,
+            "with_payload": true,
+        });
+        let obj = body
+            .as_object_mut()
+            .expect("query body should remain an object");
+
+        if let Some(name) = using.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }) {
+            obj.insert("using".into(), Value::String(name));
+        }
+
+        if let Some(threshold) = score_threshold {
+            obj.insert("score_threshold".into(), Value::from(threshold));
+        }
+
+        if let Some(filter_value) = filter {
+            obj.insert("filter".into(), filter_value);
+        }
+
+        let response = self
+            .request(
+                Method::POST,
+                &format!("collections/{collection_name}/points/query"),
+            )?
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let error = QdrantError::UnexpectedStatus { status, body };
+            tracing::error!(collection = collection_name, error = %error, "Qdrant search failed");
+            return Err(error);
+        }
+
+        let payload: QueryResponse = response.json().await?;
+        let points = match payload.result {
+            QueryResponseResult::Points(points) => points,
+            QueryResponseResult::Object { points, .. } => points,
+        };
+        let results = points
+            .into_iter()
+            .map(|point| ScoredPoint {
+                id: stringify_point_id(point.id),
+                score: point.score,
+                payload: point.payload,
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     /// Ensure standard payload indexes exist for common filters.
     pub async fn ensure_payload_indexes(&self, collection_name: &str) -> Result<(), QdrantError> {
         // Fields and their schemas to index.
@@ -416,6 +521,60 @@ fn format_endpoint(base: &str, path: &str) -> String {
     format!("{base}/{path}")
 }
 
+/// Compose the standard Qdrant filter payload from optional search arguments.
+pub fn build_search_filter(args: &SearchFilterArgs) -> Option<Value> {
+    let mut must: Vec<Value> = Vec::new();
+
+    if let Some(project_id) = args.project_id.as_ref().and_then(|value| non_empty(value)) {
+        must.push(json!({
+            "key": "project_id",
+            "match": { "value": project_id }
+        }));
+    }
+
+    if let Some(memory_type) = args.memory_type.as_ref().and_then(|value| non_empty(value)) {
+        must.push(json!({
+            "key": "memory_type",
+            "match": { "value": memory_type }
+        }));
+    }
+
+    if let Some(tags) = args.tags.as_ref() {
+        let cleaned: Vec<String> = tags
+            .iter()
+            .filter_map(|tag| non_empty(tag).map(|value| value.to_string()))
+            .collect();
+        if !cleaned.is_empty() {
+            must.push(json!({
+                "key": "tags",
+                "match": { "any": cleaned }
+            }));
+        }
+    }
+
+    if let Some(range) = args.time_range.as_ref() {
+        let mut boundaries = Map::new();
+        if let Some(start) = range.start.as_ref().and_then(|value| non_empty(value)) {
+            boundaries.insert("gte".into(), Value::String(start.to_string()));
+        }
+        if let Some(end) = range.end.as_ref().and_then(|value| non_empty(value)) {
+            boundaries.insert("lte".into(), Value::String(end.to_string()));
+        }
+        if !boundaries.is_empty() {
+            must.push(json!({
+                "key": "timestamp",
+                "range": Value::Object(boundaries)
+            }));
+        }
+    }
+
+    if must.is_empty() {
+        None
+    } else {
+        Some(json!({ "must": must }))
+    }
+}
+
 fn build_payload(
     memory_id: &str,
     text: &str,
@@ -490,6 +649,31 @@ fn default_memory_type() -> String {
     "semantic".to_string()
 }
 
+fn stringify_point_id(id: Value) -> String {
+    match id {
+        Value::String(text) => text,
+        Value::Number(number) => number.to_string(),
+        Value::Object(map) => map
+            .get("uuid")
+            .and_then(|value| match value {
+                Value::String(uuid) => Some(uuid.clone()),
+                other => Some(other.to_string()),
+            })
+            .unwrap_or_else(|| Value::Object(map).to_string()),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn non_empty(input: &str) -> Option<&str> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 #[derive(Deserialize)]
 struct ListCollectionsResponse {
     result: ListCollectionsResult,
@@ -503,6 +687,31 @@ struct ListCollectionsResult {
 #[derive(Deserialize)]
 struct CollectionDescription {
     name: String,
+}
+
+#[derive(Deserialize)]
+struct QueryResponse {
+    result: QueryResponseResult,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum QueryResponseResult {
+    Points(Vec<QueryPoint>),
+    Object {
+        #[serde(default)]
+        points: Vec<QueryPoint>,
+        #[serde(default)]
+        _count: Option<usize>,
+    },
+}
+
+#[derive(Deserialize)]
+struct QueryPoint {
+    id: Value,
+    score: f32,
+    #[serde(default)]
+    payload: Option<Map<String, Value>>,
 }
 
 #[derive(Deserialize)]
@@ -558,6 +767,9 @@ fn accumulate_tags(payload: &Map<String, Value>, tags: &mut BTreeSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use httpmock::{Method::POST, MockServer};
+    use reqwest::Client;
+    use serde_json::json;
 
     #[test]
     fn chunk_hash_is_stable() {
@@ -644,5 +856,142 @@ mod tests {
             tags.iter().collect::<Vec<_>>(),
             vec![&"alpha".to_string(), &"beta".to_string()]
         );
+    }
+
+    #[test]
+    fn build_search_filter_handles_project_id() {
+        let filter = build_search_filter(&SearchFilterArgs {
+            project_id: Some("repo-a".into()),
+            ..Default::default()
+        })
+        .expect("filter");
+
+        assert_eq!(
+            filter,
+            json!({
+                "must": [
+                    {
+                        "key": "project_id",
+                        "match": { "value": "repo-a" }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn build_search_filter_handles_tags() {
+        let filter = build_search_filter(&SearchFilterArgs {
+            tags: Some(vec!["alpha".into(), "beta".into()]),
+            ..Default::default()
+        })
+        .expect("filter");
+
+        assert_eq!(
+            filter,
+            json!({
+                "must": [
+                    {
+                        "key": "tags",
+                        "match": { "any": ["alpha", "beta"] }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn build_search_filter_handles_time_range() {
+        let filter = build_search_filter(&SearchFilterArgs {
+            time_range: Some(SearchTimeRange {
+                start: Some("2025-01-01T00:00:00Z".into()),
+                end: Some("2025-12-31T23:59:59Z".into()),
+            }),
+            ..Default::default()
+        })
+        .expect("filter");
+
+        assert_eq!(
+            filter,
+            json!({
+                "must": [
+                    {
+                        "key": "timestamp",
+                        "range": {
+                            "gte": "2025-01-01T00:00:00Z",
+                            "lte": "2025-12-31T23:59:59Z"
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn build_search_filter_returns_none_when_empty() {
+        assert!(build_search_filter(&SearchFilterArgs::default()).is_none());
+    }
+
+    #[tokio::test]
+    async fn search_points_emits_expected_request() {
+        let server = MockServer::start_async().await;
+
+        let filter = build_search_filter(&SearchFilterArgs {
+            project_id: Some("repo-a".into()),
+            tags: Some(vec!["alpha".into(), "beta".into()]),
+            ..Default::default()
+        })
+        .expect("filter value");
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/collections/demo/points/query");
+                then.status(200).json_body(json!({
+                    "status": "ok",
+                    "time": 0.0,
+                    "result": [
+                        {
+                            "id": "memory-1",
+                            "score": 0.42,
+                            "payload": {
+                                "text": "Example",
+                                "project_id": "repo-a"
+                            }
+                        }
+                    ]
+                }));
+            })
+            .await;
+
+        let service = QdrantService {
+            client: Client::builder()
+                .user_agent("rusty-mem-test")
+                .build()
+                .expect("client"),
+            base_url: server.base_url(),
+            api_key: None,
+        };
+
+        let results = service
+            .search_points(
+                "demo",
+                vec![0.1, 0.2],
+                Some(filter.clone()),
+                3,
+                Some(0.25),
+                None,
+            )
+            .await
+            .expect("search request");
+
+        mock.assert();
+
+        assert_eq!(results.len(), 1);
+        let hit = &results[0];
+        assert_eq!(hit.id, "memory-1");
+        assert!((hit.score - 0.42).abs() < f32::EPSILON);
+        let payload = hit.payload.as_ref().expect("payload");
+        assert_eq!(payload["project_id"], Value::String("repo-a".into()));
+        assert_eq!(payload["text"], Value::String("Example".into()));
     }
 }

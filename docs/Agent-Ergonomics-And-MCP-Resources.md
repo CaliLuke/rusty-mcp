@@ -32,7 +32,7 @@ This note evaluates agent ergonomics of the current plan and proposes concrete i
   - Upstream failures as internal errors with remediation (“Qdrant unreachable: check http://localhost:6333”)
 - Tool discoverability and guidance
   - Add concise “When to use” and 2 examples per tool (happy-path, advanced)
-  - Consider aliasing `"index"` → `push` for ingestion discoverability
+  - Keep a single ingestion tool (`push`) to avoid redundant aliases
 
 ## Use MCP Resources for Static/Discoverable Data
 

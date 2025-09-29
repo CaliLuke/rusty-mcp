@@ -2,10 +2,12 @@ use crate::config::{EmbeddingProvider, get_config};
 use crate::embedding::{EmbeddingClient, get_embedding_client};
 use crate::metrics::{CodeMetrics, MetricsSnapshot};
 use crate::qdrant::{
-    IndexSummary, PayloadOverrides, PointInsert, QdrantError, QdrantService, compute_chunk_hash,
+    self, IndexSummary, PayloadOverrides, PointInsert, QdrantError, QdrantService,
+    compute_chunk_hash,
 };
 use anyhow::Error as TokenizerError;
 use semchunk_rs::Chunker;
+use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
@@ -47,6 +49,28 @@ pub enum ProcessingError {
     Qdrant(#[from] QdrantError),
 }
 
+/// Errors emitted while orchestrating similarity searches.
+#[derive(Debug, Error)]
+pub enum SearchError {
+    /// Embedding provider failed to return vectors for the query text.
+    #[error("Failed to generate embeddings: {0}")]
+    Embedding(#[from] crate::embedding::EmbeddingClientError),
+    /// Qdrant search request returned an error response.
+    #[error("Qdrant request failed: {0}")]
+    Qdrant(#[from] QdrantError),
+    /// Returned embedding dimension does not match configuration.
+    #[error("Embedding dimension mismatch: expected {expected}, got {actual}")]
+    DimensionMismatch {
+        /// Expected embedding dimension configured on the server.
+        expected: usize,
+        /// Actual embedding dimension produced by the provider.
+        actual: usize,
+    },
+    /// Embedding provider returned no vectors.
+    #[error("Embedding provider returned no vectors for the query")]
+    EmptyEmbedding,
+}
+
 /// Coordinates the full ingestion pipeline: semantic chunking, embedding, and Qdrant writes.
 ///
 /// The service owns long-lived handles to the embedding client, Qdrant transport, and metrics
@@ -86,6 +110,60 @@ pub struct QdrantHealthSnapshot {
     /// Optional diagnostic string captured when Qdrant is unreachable.
     pub error: Option<String>,
 }
+
+/// Parameters supplied to the search pipeline.
+#[derive(Debug, Clone)]
+pub struct SearchRequest {
+    /// Natural language query text to embed.
+    pub query_text: String,
+    /// Optional Qdrant collection override.
+    pub collection: Option<String>,
+    /// Optional payload filter for `project_id`.
+    pub project_id: Option<String>,
+    /// Optional payload filter for `memory_type`.
+    pub memory_type: Option<String>,
+    /// Optional contains-any filter for `tags`.
+    pub tags: Option<Vec<String>>,
+    /// Optional timestamp boundaries for `timestamp` payload field.
+    pub time_range: Option<SearchTimeRange>,
+    /// Maximum number of results to return (defaults applied downstream).
+    pub limit: Option<usize>,
+    /// Minimum score accepted from Qdrant (defaults applied downstream).
+    pub score_threshold: Option<f32>,
+}
+
+/// Inclusive timestamp boundaries expressed as RFC3339 strings.
+#[derive(Debug, Clone, Default)]
+pub struct SearchTimeRange {
+    /// Inclusive start timestamp (`gte`).
+    pub start: Option<String>,
+    /// Inclusive end timestamp (`lte`).
+    pub end: Option<String>,
+}
+
+/// Structured search hit returned to API consumers.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    /// Identifier assigned by Qdrant.
+    pub id: String,
+    /// Similarity score reported by Qdrant.
+    pub score: f32,
+    /// Stored text payload, if available.
+    pub text: Option<String>,
+    /// Stored project identifier, if available.
+    pub project_id: Option<String>,
+    /// Stored memory type, if available.
+    pub memory_type: Option<String>,
+    /// Stored tags, if available.
+    pub tags: Option<Vec<String>>,
+    /// Stored timestamp, if available.
+    pub timestamp: Option<String>,
+    /// Stored source URI, if available.
+    pub source_uri: Option<String>,
+}
+
+const DEFAULT_SEARCH_LIMIT: usize = 5;
+const DEFAULT_SEARCH_SCORE_THRESHOLD: f32 = 0.25;
 
 impl ProcessingService {
     /// Build a new processing service, initializing backing services as needed.
@@ -201,6 +279,66 @@ impl ProcessingService {
             updated,
             skipped_duplicates,
         })
+    }
+
+    /// Execute a semantic search query against Qdrant using the configured embedding provider.
+    pub async fn search_memories(
+        &self,
+        request: SearchRequest,
+    ) -> Result<Vec<SearchHit>, SearchError> {
+        let config = get_config();
+        let SearchRequest {
+            query_text,
+            collection,
+            project_id,
+            memory_type,
+            tags,
+            time_range,
+            limit,
+            score_threshold,
+        } = request;
+
+        let collection_name = collection.unwrap_or_else(|| config.qdrant_collection_name.clone());
+        let mut vectors = self
+            .embedding_client
+            .generate_embeddings(vec![query_text])
+            .await?;
+        let vector = vectors.pop().ok_or(SearchError::EmptyEmbedding)?;
+
+        let expected = config.embedding_dimension;
+        let actual = vector.len();
+        if actual != expected {
+            return Err(SearchError::DimensionMismatch { expected, actual });
+        }
+
+        let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT).max(1);
+        let threshold = score_threshold.unwrap_or(DEFAULT_SEARCH_SCORE_THRESHOLD);
+
+        let filter_args = qdrant::SearchFilterArgs {
+            project_id: sanitize_project_id(project_id),
+            memory_type: sanitize_memory_type(memory_type),
+            tags: sanitize_tags(tags),
+            time_range: time_range.map(|range| qdrant::SearchTimeRange {
+                start: range.start,
+                end: range.end,
+            }),
+        };
+
+        let filter = qdrant::build_search_filter(&filter_args);
+
+        let hits = self
+            .qdrant_service
+            .search_points(
+                &collection_name,
+                vector,
+                filter,
+                limit,
+                Some(threshold),
+                None,
+            )
+            .await?;
+
+        Ok(hits.into_iter().map(map_scored_point).collect())
     }
 
     /// Ensure that the target collection exists within Qdrant.
@@ -424,6 +562,56 @@ fn sanitize_tags(tags: Option<Vec<String>>) -> Option<Vec<String>> {
     }
 }
 
+fn map_scored_point(point: qdrant::ScoredPoint) -> SearchHit {
+    let payload = point.payload.unwrap_or_default();
+    let text = extract_string(&payload, "text");
+    let project_id = extract_string(&payload, "project_id");
+    let memory_type = extract_string(&payload, "memory_type");
+    let timestamp = extract_string(&payload, "timestamp");
+    let source_uri = extract_string(&payload, "source_uri");
+    let tags = extract_tags(&payload);
+
+    SearchHit {
+        id: point.id,
+        score: point.score,
+        text,
+        project_id,
+        memory_type,
+        tags,
+        timestamp,
+        source_uri,
+    }
+}
+
+fn extract_string(payload: &Map<String, Value>, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+}
+
+fn extract_tags(payload: &Map<String, Value>) -> Option<Vec<String>> {
+    match payload.get("tags") {
+        Some(Value::Array(values)) => {
+            let tags: Vec<String> = values
+                .iter()
+                .filter_map(|value| value.as_str().map(|tag| tag.trim().to_string()))
+                .filter(|tag| !tag.is_empty())
+                .collect();
+            if tags.is_empty() { None } else { Some(tags) }
+        }
+        Some(Value::String(tag)) => {
+            let trimmed = tag.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(vec![trimmed.to_string()])
+            }
+        }
+        _ => None,
+    }
+}
+
 const MIN_AUTOMATIC_CHUNK_SIZE: usize = 256;
 const MAX_AUTOMATIC_CHUNK_SIZE: usize = 2048;
 
@@ -595,11 +783,13 @@ fn chunk_text_with_counter(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChunkingError, build_tiktoken_counter, chunk_text, chunk_text_with_counter, dedupe_chunks,
-        default_token_counter, determine_chunk_size, sanitize_memory_type, sanitize_project_id,
-        sanitize_tags,
+        ChunkingError, SearchHit, build_tiktoken_counter, chunk_text, chunk_text_with_counter,
+        dedupe_chunks, default_token_counter, determine_chunk_size, extract_tags, map_scored_point,
+        sanitize_memory_type, sanitize_project_id, sanitize_tags,
     };
     use crate::config::EmbeddingProvider;
+    use crate::qdrant::ScoredPoint;
+    use serde_json::{Map, Value, json};
 
     #[test]
     fn chunk_text_respects_chunk_size_whitespace_counter() {
@@ -718,5 +908,54 @@ mod tests {
         let values = tags.unwrap();
         assert!(values.contains(&"alpha".into()));
         assert!(values.contains(&"beta".into()));
+    }
+
+    #[test]
+    fn map_scored_point_extracts_payload_fields() {
+        let mut payload = Map::new();
+        payload.insert("text".into(), Value::String("Example".into()));
+        payload.insert("project_id".into(), Value::String("repo-a".into()));
+        payload.insert("memory_type".into(), Value::String("semantic".into()));
+        payload.insert(
+            "timestamp".into(),
+            Value::String("2025-01-01T00:00:00Z".into()),
+        );
+        payload.insert("source_uri".into(), Value::String("file://note".into()));
+        payload.insert(
+            "tags".into(),
+            Value::Array(vec![
+                Value::String("alpha".into()),
+                Value::String("beta".into()),
+            ]),
+        );
+
+        let point = ScoredPoint {
+            id: "memory-1".into(),
+            score: 0.42,
+            payload: Some(payload),
+        };
+
+        let hit: SearchHit = map_scored_point(point);
+        assert_eq!(hit.id, "memory-1");
+        assert!((hit.score - 0.42).abs() < f32::EPSILON);
+        assert_eq!(hit.text.as_deref(), Some("Example"));
+        assert_eq!(hit.project_id.as_deref(), Some("repo-a"));
+        assert_eq!(hit.memory_type.as_deref(), Some("semantic"));
+        assert_eq!(hit.timestamp.as_deref(), Some("2025-01-01T00:00:00Z"));
+        assert_eq!(hit.source_uri.as_deref(), Some("file://note"));
+        let tags = hit.tags.expect("tags present");
+        assert_eq!(tags, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn extract_tags_handles_string_value() {
+        let mut payload = Map::new();
+        payload.insert("tags".into(), Value::String(" single ".into()));
+        let tags = extract_tags(&payload).expect("tags");
+        assert_eq!(tags, vec!["single".to_string()]);
+
+        payload.insert("tags".into(), json!(["alpha", "", "beta"]));
+        let tags = extract_tags(&payload).expect("array tags");
+        assert_eq!(tags, vec!["alpha".to_string(), "beta".to_string()]);
     }
 }

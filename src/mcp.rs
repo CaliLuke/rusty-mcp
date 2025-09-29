@@ -2,7 +2,9 @@ use std::{borrow::Cow, sync::Arc};
 
 use crate::{
     config::{EmbeddingProvider, get_config},
-    processing::{IngestMetadata, ProcessingService, QdrantHealthSnapshot},
+    processing::{
+        IngestMetadata, ProcessingService, QdrantHealthSnapshot, SearchRequest, SearchTimeRange,
+    },
 };
 use rmcp::{
     ErrorData as McpError,
@@ -32,6 +34,9 @@ const PROJECT_TAGS_TEMPLATE_URI: &str = "mcp://rusty-mem/projects/{project_id}/t
 const PROJECT_TAGS_PREFIX: &str = "mcp://rusty-mem/projects/";
 const PROJECT_TAGS_SUFFIX: &str = "/tags";
 
+const SEARCH_DEFAULT_LIMIT: usize = 5;
+const SEARCH_DEFAULT_THRESHOLD: f32 = 0.25;
+
 impl RustyMemMcpServer {
     /// Create a new MCP server using the supplied processing pipeline.
     pub fn new(processing: Arc<ProcessingService>) -> Self {
@@ -40,7 +45,24 @@ impl RustyMemMcpServer {
 
     fn describe_tools(&self) -> Vec<Tool> {
         let push_schema = Arc::new(index_input_schema());
+        let search_schema = Arc::new(search_input_schema());
         vec![
+            Tool {
+                name: Cow::Borrowed("search"),
+                title: Some("Search Memories".to_string()),
+                description: Some(Cow::Owned(
+                    "Search stored memories using semantic similarity. Provide `query_text` and optional filters (`project_id`, `memory_type`, `tags`, `time_range`, `collection`). Defaults: `limit=5`, `score_threshold=0.25`. Example: {\n  \"query_text\": \"current architecture plan\",\n  \"project_id\": \"default\",\n  \"tags\": [\"architecture\"],\n  \"limit\": 5\n}.".to_string(),
+                )),
+                input_schema: search_schema.clone(),
+                output_schema: None,
+                annotations: Some(
+                    ToolAnnotations::with_title("Search Memories")
+                        .read_only(true)
+                        .idempotent(true)
+                        .open_world(false),
+                ),
+                icons: None,
+            },
             Tool {
                 name: Cow::Borrowed("push"),
                 title: Some("Index Document".to_string()),
@@ -51,22 +73,6 @@ impl RustyMemMcpServer {
                 output_schema: None,
                 annotations: Some(
                     ToolAnnotations::with_title("Index Document")
-                        .destructive(true)
-                        .idempotent(false)
-                        .open_world(false),
-                ),
-                icons: None,
-            },
-            Tool {
-                name: Cow::Borrowed("index"),
-                title: Some("Alias: push".to_string()),
-                description: Some(Cow::Borrowed(
-                    "Alias for `push` to mirror the HTTP endpoint name. Accepts the same payload and returns identical results.",
-                )),
-                input_schema: push_schema.clone(),
-                output_schema: None,
-                annotations: Some(
-                    ToolAnnotations::with_title("Index Document (alias)")
                         .destructive(true)
                         .idempotent(false)
                         .open_world(false),
@@ -175,7 +181,7 @@ impl ServerHandler for RustyMemMcpServer {
                 .build(),
             server_info: implementation,
             instructions: Some(
-                "Rusty Memory MCP usage:\n1. Call listResources({}) to discover read-only resources, then readResource each URI (memory-types, health, projects).\n2. For tags, call listResourceTemplates({}) to obtain URI patterns such as mcp://rusty-mem/projects/{project_id}/tags, substitute the project_id, and invoke readResource.\n3. Call get-collections to discover existing Qdrant collections (pass {}).\n4. To create or update a collection, call new-collection with { \"name\": <collection>, \"vector_size\": <optional dimension> }.\n5. Push content with push (or index) using { \"text\": <document>, \"collection\": <optional override>, \"project_id\": \"default\" (optional), \"memory_type\": \"semantic\" (optional), \"tags\": [<strings>], \"source_uri\": <string> }. Responses include `chunksIndexed`, `chunkSize`, `inserted`, `updated`, and `skippedDuplicates`.\n6. Inspect ingestion counters via metrics (pass {}) to confirm documents were processed; the result echoes `lastChunkSize`.\nAll tool responses return structured JSON; prefer the structured payload over the text summary.".into(),
+                "Rusty Memory MCP usage:\n1. Call listResources({}) to discover read-only resources, then readResource each URI (memory-types, health, projects).\n2. For tags, call listResourceTemplates({}) to obtain URI patterns such as mcp://rusty-mem/projects/{project_id}/tags, substitute the project_id, and invoke readResource.\n3. Call get-collections to discover existing Qdrant collections (pass {}).\n4. To create or update a collection, call new-collection with { \"name\": <collection>, \"vector_size\": <optional dimension> }.\n5. Index content with push using { \"text\": <document>, \"collection\": <optional override>, \"project_id\": \"default\" (optional), \"memory_type\": \"semantic\" (optional), \"tags\": [<strings>], \"source_uri\": <string> }. Responses include `chunksIndexed`, `chunkSize`, `inserted`, `updated`, and `skippedDuplicates`.\n6. Search memories with search using { \"query_text\": <question>, \"project_id\": \"default\" (optional), \"limit\": 5, \"score_threshold\": 0.25 }. Results return `id`, `score`, `text`, and stored metadata.\n7. Inspect ingestion counters via metrics (pass {}) to confirm documents were processed; the result echoes `lastChunkSize`.\nAll tool responses return structured JSON; prefer the structured payload over the text summary.".into(),
             ),
             ..ServerInfo::default()
         }
@@ -300,7 +306,7 @@ impl ServerHandler for RustyMemMcpServer {
         let processing = self.processing.clone();
         async move {
             match request.name.as_ref() {
-                "push" | "index" => {
+                "push" => {
                     let args: IndexToolRequest = parse_arguments(request.arguments)?;
                     if args.text.trim().is_empty() {
                         return Err(McpError::invalid_params("`text` must not be empty", None));
@@ -333,6 +339,84 @@ impl ServerHandler for RustyMemMcpServer {
                         "inserted": outcome.inserted,
                         "updated": outcome.updated,
                         "skippedDuplicates": outcome.skipped_duplicates,
+                    })))
+                }
+                "search" => {
+                    let args: SearchToolRequest = parse_arguments(request.arguments)?;
+                    if args.query_text.trim().is_empty() {
+                        return Err(McpError::invalid_params(
+                            "`query_text` must not be empty",
+                            None,
+                        ));
+                    }
+
+                    let SearchToolRequest {
+                        query_text,
+                        project_id,
+                        memory_type,
+                        tags,
+                        time_range,
+                        limit,
+                        score_threshold,
+                        collection,
+                    } = args;
+
+                    let config = get_config();
+                    let collection_name = collection
+                        .clone()
+                        .unwrap_or_else(|| config.qdrant_collection_name.clone());
+                    let limit_value = limit.unwrap_or(SEARCH_DEFAULT_LIMIT).max(1);
+                    let threshold_value = score_threshold.unwrap_or(SEARCH_DEFAULT_THRESHOLD);
+
+                    let search_request = SearchRequest {
+                        query_text,
+                        collection: Some(collection_name.clone()),
+                        project_id,
+                        memory_type,
+                        tags,
+                        time_range: time_range.map(SearchTimeRange::from),
+                        limit: Some(limit_value),
+                        score_threshold: Some(threshold_value),
+                    };
+
+                    let hits = processing
+                        .search_memories(search_request)
+                        .await
+                        .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+
+                    let results: Vec<Value> = hits
+                        .into_iter()
+                        .map(|hit| {
+                            let mut item = Map::new();
+                            item.insert("id".into(), Value::String(hit.id));
+                            item.insert("score".into(), json!(hit.score));
+                            if let Some(text) = hit.text {
+                                item.insert("text".into(), Value::String(text));
+                            }
+                            if let Some(project_id) = hit.project_id {
+                                item.insert("project_id".into(), Value::String(project_id));
+                            }
+                            if let Some(memory_type) = hit.memory_type {
+                                item.insert("memory_type".into(), Value::String(memory_type));
+                            }
+                            if let Some(tags) = hit.tags {
+                                item.insert("tags".into(), json!(tags));
+                            }
+                            if let Some(timestamp) = hit.timestamp {
+                                item.insert("timestamp".into(), Value::String(timestamp));
+                            }
+                            if let Some(source_uri) = hit.source_uri {
+                                item.insert("source_uri".into(), Value::String(source_uri));
+                            }
+                            Value::Object(item)
+                        })
+                        .collect();
+
+                    Ok(CallToolResult::structured(json!({
+                        "results": results,
+                        "collection": collection_name,
+                        "limit": limit_value,
+                        "scoreThreshold": threshold_value,
                     })))
                 }
                 "get-collections" => {
@@ -399,6 +483,44 @@ struct CreateCollectionRequest {
     name: String,
     #[serde(default)]
     vector_size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchToolRequest {
+    query_text: String,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    memory_type: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    time_range: Option<SearchToolTimeRange>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    score_threshold: Option<f32>,
+    #[serde(default)]
+    collection: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchToolTimeRange {
+    #[serde(default)]
+    start: Option<String>,
+    #[serde(default)]
+    end: Option<String>,
+}
+
+impl From<SearchToolTimeRange> for SearchTimeRange {
+    fn from(value: SearchToolTimeRange) -> Self {
+        Self {
+            start: value.start,
+            end: value.end,
+        }
+    }
 }
 
 fn parse_arguments<T: DeserializeOwned>(arguments: Option<JsonObject>) -> Result<T, McpError> {
@@ -552,6 +674,103 @@ fn create_collection_input_schema() -> JsonObject {
     properties.insert("vector_size".into(), Value::Object(vector_schema));
 
     finalize_object_schema(properties, &["name"])
+}
+
+fn search_input_schema() -> JsonObject {
+    let mut properties = JsonObject::new();
+    properties.insert(
+        "query_text".into(),
+        string_schema("Natural language query text to embed and search with"),
+    );
+
+    let mut project_schema = JsonObject::new();
+    project_schema.insert("type".into(), Value::String("string".into()));
+    project_schema.insert(
+        "description".into(),
+        Value::String("Filter results to a specific project_id".into()),
+    );
+    properties.insert("project_id".into(), Value::Object(project_schema));
+
+    let mut memory_schema = JsonObject::new();
+    memory_schema.insert("type".into(), Value::String("string".into()));
+    memory_schema.insert(
+        "description".into(),
+        Value::String("Filter results to a specific memory_type".into()),
+    );
+    memory_schema.insert(
+        "enum".into(),
+        Value::Array(
+            ["episodic", "semantic", "procedural"]
+                .into_iter()
+                .map(|variant| Value::String(variant.into()))
+                .collect(),
+        ),
+    );
+    properties.insert("memory_type".into(), Value::Object(memory_schema));
+
+    let mut tag_item_schema = JsonObject::new();
+    tag_item_schema.insert("type".into(), Value::String("string".into()));
+    let mut tags_schema = JsonObject::new();
+    tags_schema.insert("type".into(), Value::String("array".into()));
+    tags_schema.insert(
+        "description".into(),
+        Value::String("Contains-any filter applied to payload tags".into()),
+    );
+    tags_schema.insert("items".into(), Value::Object(tag_item_schema));
+    properties.insert("tags".into(), Value::Object(tags_schema));
+
+    let mut time_range_properties = JsonObject::new();
+    time_range_properties.insert(
+        "start".into(),
+        string_schema("Inclusive RFC3339 timestamp lower bound"),
+    );
+    time_range_properties.insert(
+        "end".into(),
+        string_schema("Inclusive RFC3339 timestamp upper bound"),
+    );
+    let mut time_range_schema = JsonObject::new();
+    time_range_schema.insert("type".into(), Value::String("object".into()));
+    time_range_schema.insert("properties".into(), Value::Object(time_range_properties));
+    time_range_schema.insert("additionalProperties".into(), Value::Bool(false));
+    properties.insert("time_range".into(), Value::Object(time_range_schema));
+
+    let mut limit_schema = JsonObject::new();
+    limit_schema.insert("type".into(), Value::String("integer".into()));
+    limit_schema.insert(
+        "description".into(),
+        Value::String("Maximum number of results to return".into()),
+    );
+    limit_schema.insert("minimum".into(), Value::Number(1.into()));
+    limit_schema.insert(
+        "default".into(),
+        Value::Number(serde_json::Number::from(SEARCH_DEFAULT_LIMIT as u64)),
+    );
+    properties.insert("limit".into(), Value::Object(limit_schema));
+
+    let mut threshold_schema = JsonObject::new();
+    threshold_schema.insert("type".into(), Value::String("number".into()));
+    threshold_schema.insert(
+        "description".into(),
+        Value::String("Minimum score threshold for matches".into()),
+    );
+    threshold_schema.insert(
+        "default".into(),
+        Value::Number(
+            serde_json::Number::from_f64(SEARCH_DEFAULT_THRESHOLD as f64)
+                .expect("valid score threshold"),
+        ),
+    );
+    properties.insert("score_threshold".into(), Value::Object(threshold_schema));
+
+    let mut collection_schema = JsonObject::new();
+    collection_schema.insert("type".into(), Value::String("string".into()));
+    collection_schema.insert(
+        "description".into(),
+        Value::String("Optional collection override".into()),
+    );
+    properties.insert("collection".into(), Value::Object(collection_schema));
+
+    finalize_object_schema(properties, &["query_text"])
 }
 
 fn empty_object_schema() -> JsonObject {
