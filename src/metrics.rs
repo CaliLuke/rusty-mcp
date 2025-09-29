@@ -1,3 +1,13 @@
+//! Lightweight ingestion counters used for diagnostics.
+//!
+//! The `CodeMetrics` type exposes lock‑free counters that track:
+//! - Documents indexed
+//! - Chunks indexed (cumulative)
+//! - The effective chunk size used for the last ingestion
+//!
+//! The snapshot is surfaced via HTTP (`GET /metrics`) and MCP (`metrics` tool) to help validate
+//! chunking heuristics and overall ingestion activity during development.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Thread-safe counters describing ingestion activity.

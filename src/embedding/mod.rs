@@ -1,6 +1,21 @@
-use crate::config::get_config;
+//! Embedding client abstraction and provider adapters.
+//!
+//! Rusty Memory currently supports two modes:
+//!
+//! - `EmbeddingProvider::Ollama` – Real embeddings fetched from a local Ollama runtime
+//!   (`OLLAMA_URL`, `EMBEDDING_MODEL`). Dimensions are validated against `EMBEDDING_DIMENSION`.
+//! - `EmbeddingProvider::OpenAI` (and other values) – A deterministic fallback encoder that
+//!   produces stable, normalized vectors of length `EMBEDDING_DIMENSION`. This keeps the
+//!   end‑to‑end pipeline testable without external credentials.
+//!
+//! The concrete provider is selected at runtime by `get_embedding_client()` based on configuration.
+use crate::config::{EmbeddingProvider, get_config};
 use async_trait::async_trait;
+use ollama_rs::Ollama;
+use ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest;
 use thiserror::Error;
+
+const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
 
 /// Errors raised by embedding providers.
 #[derive(Debug, Error)]
@@ -8,6 +23,12 @@ pub enum EmbeddingClientError {
     /// Provider was unable to produce embeddings for the supplied input.
     #[error("Failed to generate embeddings: {0}")]
     GenerationFailed(String),
+    /// Provider was unreachable or returned a transport-level failure.
+    #[error("Embedding provider unavailable: {0}")]
+    ProviderUnavailable(String),
+    /// Configuration is invalid or insufficient to request embeddings.
+    #[error("Invalid embedding configuration: {0}")]
+    Configuration(String),
 }
 
 /// Interface implemented by embedding backends.
@@ -81,13 +102,13 @@ impl EmbeddingClient for AiLibClient {
         );
 
         if dimension == 0 {
-            return Err(EmbeddingClientError::GenerationFailed(
+            return Err(EmbeddingClientError::Configuration(
                 "embedding dimension must be greater than zero".to_string(),
             ));
         }
 
         if texts.is_empty() {
-            return Err(EmbeddingClientError::GenerationFailed(
+            return Err(EmbeddingClientError::Configuration(
                 "no texts provided".to_string(),
             ));
         }
@@ -101,7 +122,167 @@ impl EmbeddingClient for AiLibClient {
     }
 }
 
+#[derive(Clone)]
+struct OllamaClient {
+    inner: Ollama,
+    model: String,
+    dimension: usize,
+    base_url: String,
+}
+
+impl OllamaClient {
+    fn try_new(
+        base_url: String,
+        model: String,
+        dimension: usize,
+    ) -> Result<Self, EmbeddingClientError> {
+        if dimension == 0 {
+            return Err(EmbeddingClientError::Configuration(
+                "embedding dimension must be greater than zero".to_string(),
+            ));
+        }
+
+        let inner = Ollama::try_new(base_url.as_str()).map_err(|error| {
+            EmbeddingClientError::Configuration(format!("invalid OLLAMA_URL '{base_url}': {error}"))
+        })?;
+
+        Ok(Self {
+            inner,
+            model,
+            dimension,
+            base_url,
+        })
+    }
+}
+
+#[async_trait]
+impl EmbeddingClient for OllamaClient {
+    async fn generate_embeddings(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingClientError> {
+        if texts.is_empty() {
+            return Err(EmbeddingClientError::Configuration(
+                "no texts provided".to_string(),
+            ));
+        }
+
+        let text_count = texts.len();
+
+        tracing::debug!(
+            url = %self.base_url,
+            model = %self.model,
+            count = text_count,
+            "Requesting embeddings from Ollama",
+        );
+
+        let request = GenerateEmbeddingsRequest::new(self.model.clone(), texts.into());
+        let response = self
+            .inner
+            .generate_embeddings(request)
+            .await
+            .map_err(|error| {
+                EmbeddingClientError::ProviderUnavailable(format!(
+                    "failed to reach Ollama at {}: {}. Set OLLAMA_URL and ensure the runtime is running.",
+                    self.base_url, error
+                ))
+            })?;
+
+        let embeddings = response.embeddings;
+
+        if embeddings.len() != text_count {
+            return Err(EmbeddingClientError::GenerationFailed(format!(
+                "Ollama at {} returned {} embeddings for {} texts",
+                self.base_url,
+                embeddings.len(),
+                text_count
+            )));
+        }
+
+        for vector in &embeddings {
+            if vector.len() != self.dimension {
+                return Err(EmbeddingClientError::GenerationFailed(format!(
+                    "Ollama model '{}' at {} produced vectors of dimension {} but EMBEDDING_DIMENSION is {}. Update EMBEDDING_DIMENSION or use a compatible model.",
+                    self.model,
+                    self.base_url,
+                    vector.len(),
+                    self.dimension
+                )));
+            }
+        }
+
+        Ok(embeddings)
+    }
+}
+
 /// Build an embedding client suitable for the current configuration.
+///
+/// - When `EMBEDDING_PROVIDER=ollama`, constructs an `OllamaClient` pointed at `OLLAMA_URL`
+///   (or the default `http://127.0.0.1:11434`).
+/// - Otherwise returns the deterministic `AiLibClient`.
+///
+/// Errors during Ollama client initialization are surfaced as a process panic because the binary
+/// cannot function without a working embedding backend in that mode.
 pub fn get_embedding_client() -> Box<dyn EmbeddingClient + Send + Sync> {
-    Box::new(AiLibClient::new())
+    let config = get_config();
+    match config.embedding_provider {
+        EmbeddingProvider::Ollama => {
+            let base_url = config
+                .ollama_url
+                .clone()
+                .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
+            tracing::info!(
+                provider = "ollama",
+                url = %base_url,
+                model = %config.embedding_model,
+                "Using Ollama embedding provider"
+            );
+            let client = OllamaClient::try_new(
+                base_url,
+                config.embedding_model.clone(),
+                config.embedding_dimension,
+            )
+            .unwrap_or_else(|error| {
+                panic!("Failed to initialize Ollama embedding client: {error}");
+            });
+            Box::new(client)
+        }
+        EmbeddingProvider::OpenAI => {
+            tracing::info!(
+                provider = "deterministic-fallback",
+                configured_provider = ?config.embedding_provider,
+                "Using deterministic embeddings for compatibility"
+            );
+            Box::new(AiLibClient::new())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EmbeddingClientError, OllamaClient};
+
+    #[test]
+    fn ollama_client_rejects_zero_dimension() {
+        let result = OllamaClient::try_new(
+            "http://localhost:11434".to_string(),
+            "test-model".to_string(),
+            0,
+        );
+
+        assert!(matches!(
+            result,
+            Err(EmbeddingClientError::Configuration(message))
+                if message.contains("dimension must be greater than zero")
+        ));
+    }
+
+    #[test]
+    fn ollama_client_requires_valid_url() {
+        let result = OllamaClient::try_new("not a url".to_string(), "test-model".to_string(), 128);
+
+        assert!(
+            matches!(result, Err(EmbeddingClientError::Configuration(message)) if message.contains("invalid OLLAMA_URL"))
+        );
+    }
 }

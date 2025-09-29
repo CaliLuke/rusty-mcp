@@ -32,3 +32,5 @@ pub mod metrics;
 pub mod processing;
 /// Qdrant vector store integration.
 pub mod qdrant;
+/// Optional abstractive summarization client(s).
+pub mod summarization;

@@ -1,5 +1,8 @@
 # Repository Guidelines
 
+> ⚠️ **Always use Context7 for docs:** when you need library or API documentation, call the Context7 MCP (`resolve-library-id` → `get-library-docs`) instead of web searches. This repo mounts `/Users/luca/.codex/AGENTS.md` precisely to keep that workflow obvious—follow it by default.
+> ⚠️ **Mandatory live verification:** all final validation of MCP tools **must** run against live models/services (no mocks, no hermetic stubs). Run your end-to-end checks with the real embedding provider before signing off on any milestone.
+
 ## Project Structure & Module Organization
 
 - `src/` holds the Rust server: `main.rs` wires routes and config, `api.rs` defines Axum handlers, `processing.rs` manages chunking, and `qdrant.rs` wraps vector-store access. Supporting modules live alongside (e.g., `config.rs`, `metrics.rs`, `embedding/`).
@@ -16,6 +19,10 @@
 - `cargo test` exercises unit and integration tests; pass `-- --nocapture` to inspect stdout.
 - `./scripts/verify.sh` batches `fmt`, `clippy`, doc builds, and tests (accepts subcommands like `fmt` or `test`).
 - `./scripts/metrics.sh` refreshes coverage, complexity, and dependency reports under `reports/`.
+- Context7 MCP quickstart:
+  - Resolve docs: `context7__resolve-library-id(libraryName: "<crate>")`
+  - Fetch sections: `context7__get-library-docs(context7CompatibleLibraryID: "</org/project>", topic: "<focus>")`
+  - Prefer this flow over manual web searches unless the docs genuinely aren’t in Context7.
 
 ## CI checks via GitHub MCP
 

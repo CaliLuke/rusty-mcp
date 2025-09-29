@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use httpmock::{Method::GET, Method::PUT, Mock, MockServer};
+use httpmock::{Method::GET, Method::POST, Method::PUT, Mock, MockServer};
 use regex::Regex;
 use rmcp::{
     handler::client::ClientHandler,
@@ -47,10 +47,11 @@ impl TestHarness {
             eprintln!("[harness:init] configuring environment");
             set_env("QDRANT_URL", &base_url);
             set_env("QDRANT_COLLECTION_NAME", "rusty-mem");
-            set_env("EMBEDDING_PROVIDER", "ollama");
-            set_env("EMBEDDING_MODEL", "test-model");
-            set_env("EMBEDDING_DIMENSION", "8");
+            set_env("EMBEDDING_PROVIDER", "openai");
+            set_env("EMBEDDING_MODEL", "nomic-embed-text:latest");
+            set_env("EMBEDDING_DIMENSION", "768");
             set_env("TEXT_SPLITTER_CHUNK_SIZE", "4");
+            set_env("OLLAMA_URL", "http://127.0.0.1:11434");
 
             MOCK_SERVER.set(mock_server).ok();
 
@@ -80,6 +81,33 @@ impl TestHarness {
                                 "status": "ok",
                                 "time": 0.0,
                                 "result": {}
+                            }));
+                        }
+                    })
+                    .await,
+                server
+                    .mock_async({
+                        let collections_regex = collections_regex.clone();
+                        move |when, then| {
+                            when.method(POST)
+                                .path_matches(collections_regex.clone())
+                                .path_contains("/points/query");
+                            then.status(200).json_body(json!({
+                                "status": "ok",
+                                "time": 0.0,
+                                "result": [
+                                    {
+                                        "id": "memory-1",
+                                        "score": 0.9,
+                                        "payload": {
+                                            "text": "Example memory",
+                                            "project_id": "default",
+                                            "memory_type": "semantic",
+                                            "timestamp": "2025-01-01T00:00:00Z",
+                                            "tags": ["alpha"]
+                                        }
+                                    }
+                                ]
                             }));
                         }
                     })
@@ -188,6 +216,7 @@ async fn initialize_and_list_tools() {
         .collect();
 
     assert!(names.contains(&"push"));
+    assert!(names.contains(&"search"));
     assert!(names.contains(&"get-collections"));
     assert!(names.contains(&"new-collection"));
     assert!(names.contains(&"metrics"));
@@ -235,6 +264,42 @@ async fn index_tool_invokes_processing() {
         .structured_content
         .expect("structured metrics payload");
     assert!(metrics_payload["lastChunkSize"].as_u64().is_some());
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn search_tool_returns_results() {
+    let harness = TestHarness::new().await;
+    let service = &harness.service;
+
+    let response = service
+        .call_tool(CallToolRequestParam {
+            name: "search".into(),
+            arguments: Some(
+                json!({
+                    "query_text": "architecture notes",
+                    "tags": ["alpha"],
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        })
+        .await
+        .expect("search tool call");
+
+    assert_eq!(response.is_error, Some(false));
+    let payload = response
+        .structured_content
+        .expect("structured search payload");
+    assert_eq!(payload["collection"], "rusty-mem");
+    assert_eq!(payload["limit"], json!(5));
+    assert_eq!(payload["scoreThreshold"], json!(0.25));
+    let results = payload["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["id"], "memory-1");
+    assert_eq!(results[0]["project_id"], "default");
 
     harness.shutdown().await;
 }

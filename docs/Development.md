@@ -23,24 +23,28 @@ This guide describes the tooling, automation, and expectations for working in th
 
 The server loads configuration from environment variables via `dotenvy`:
 
-| Variable                   | Purpose                                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------------------- |
-| `QDRANT_URL`               | Base URL for the Qdrant deployment.                                                         |
-| `QDRANT_COLLECTION_NAME`   | Default collection used for indexing.                                                       |
-| `QDRANT_API_KEY`           | Optional API token forwarded to Qdrant.                                                     |
-| `EMBEDDING_PROVIDER`       | `ollama` or `openai`.                                                                       |
-| `EMBEDDING_MODEL`          | Provider-specific model identifier (e.g. `nomic-embed-text`).                               |
-| `EMBEDDING_DIMENSION`      | Vector dimensionality expected by the target collection.                                    |
-| `TEXT_SPLITTER_CHUNK_SIZE` | Optional chunk-size override. Auto-derived from the embedding model when unset.             |
-| `SERVER_PORT`              | Optional fixed HTTP port. If absent, the server selects the first open port in `4100-4199`. |
-| `RUSTY_MEM_LOG_FILE`       | Optional absolute path for structured logs. Defaults to `logs/rusty-mem.log`.               |
+| Variable                          | Purpose                                                                                            |
+| --------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `QDRANT_URL`                      | Base URL for the Qdrant deployment.                                                                |
+| `QDRANT_COLLECTION_NAME`          | Default collection used for indexing.                                                              |
+| `QDRANT_API_KEY`                  | Optional API token forwarded to Qdrant.                                                            |
+| `EMBEDDING_PROVIDER`              | `ollama` or `openai`.                                                                              |
+| `EMBEDDING_MODEL`                 | Provider-specific model identifier (e.g. `nomic-embed-text`).                                      |
+| `EMBEDDING_DIMENSION`             | Vector dimensionality expected by the target collection.                                           |
+| `TEXT_SPLITTER_CHUNK_SIZE`        | Optional chunk-size override. Auto-derived from the embedding model when unset.                    |
+| `TEXT_SPLITTER_CHUNK_OVERLAP`     | Token overlap (integer) applied between adjacent chunks; defaults to `0` for historical behaviour. |
+| `TEXT_SPLITTER_USE_SAFE_DEFAULTS` | When set to `1`, halves the automatic chunk-size heuristic to improve retrieval specificity.       |
+| `SERVER_PORT`                     | Optional fixed HTTP port. If absent, the server selects the first open port in `4100-4199`.        |
+| `RUSTY_MEM_LOG_FILE`              | Optional absolute path for structured logs. Defaults to `logs/rusty-mem.log`.                      |
 
 ### Running surfaces
 
 - HTTP API: `cargo run` launches the Axum server.
 - MCP server: `cargo run --bin rusty_mem_mcp` (or execute the release binary at `target/release/rusty_mem_mcp`).
 
-Both surfaces expose the derived chunk size: `POST /index` returns `chunkSize`, and the metrics endpoint/tool includes `lastChunkSize` alongside document and chunk counters.
+Both surfaces expose the derived chunk size: the HTTP `POST /index` response uses `chunk_size`, while the MCP `push` tool uses `chunkSize`. The metrics endpoint/tool include `lastChunkSize` alongside document and chunk counters.
+
+The automatic chunk-size heuristic uses a quarter of the embedding model's context window by default and clamps values into the `[256, 1024]` range. Opting into `TEXT_SPLITTER_USE_SAFE_DEFAULTS=1` halves that budget (window/8) to bias toward smaller chunks for improved precision. `TEXT_SPLITTER_CHUNK_OVERLAP` controls a sliding overlap (in tokens) applied after semantic chunking; keeping it unset preserves the historical split behaviour.
 
 ## Git Hooks and Automation
 
