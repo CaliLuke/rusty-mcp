@@ -162,9 +162,6 @@ pub struct SearchHit {
     pub source_uri: Option<String>,
 }
 
-const DEFAULT_SEARCH_LIMIT: usize = 5;
-const DEFAULT_SEARCH_SCORE_THRESHOLD: f32 = 0.25;
-
 impl ProcessingService {
     /// Build a new processing service, initializing backing services as needed.
     ///
@@ -311,8 +308,12 @@ impl ProcessingService {
             return Err(SearchError::DimensionMismatch { expected, actual });
         }
 
-        let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT).max(1);
-        let threshold = score_threshold.unwrap_or(DEFAULT_SEARCH_SCORE_THRESHOLD);
+        let default_limit = config.search_default_limit;
+        let max_limit = config.search_max_limit;
+        let default_threshold = config.search_default_score_threshold;
+
+        let limit = limit.unwrap_or(default_limit).clamp(1, max_limit);
+        let threshold = score_threshold.unwrap_or(default_threshold).clamp(0.0, 1.0);
 
         let filter_args = qdrant::SearchFilterArgs {
             project_id: sanitize_project_id(project_id),

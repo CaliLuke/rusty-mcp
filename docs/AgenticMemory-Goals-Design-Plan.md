@@ -141,7 +141,7 @@ Each milestone lists tasks, acceptance criteria, how to test, expected results, 
 <!-- Note: Baseline smoke checks and branch policy are consolidated under
      "Git Workflow & Release Checklist" and "Validation Protocol" below. -->
 
-### Completed Milestones (M1–M7)
+### Completed Milestones (M1–M8)
 
 - M1: Added RFC3339 `timestamp` and deterministic `chunk_hash`; expanded universal payload persisted to Qdrant. Created payload indexes for `project_id`, `memory_type`, `tags`, `timestamp`, `chunk_hash`. Kept `/index` and MCP `push` backward compatible.
 - M2: Integrated Ollama embeddings (`EMBEDDING_PROVIDER=ollama`), validated vector dimensions, and retained deterministic fallback. Performed live validation against Ollama + Qdrant.
@@ -150,85 +150,9 @@ Each milestone lists tasks, acceptance criteria, how to test, expected results, 
 - M5: Added MCP resources for `mcp://rusty-mem/projects` and `mcp://rusty-mem/projects/{project_id}/tags`, backed by Qdrant scroll + payload indexes. Validated live (Ollama + Qdrant), and introduced `schemars` for derived resource schemas.
 - M6: Delivered the MCP `search` tool with semantic filtering. Implemented reusable filter builders, Qdrant query support, processing-layer `search_memories`, and an integration test. Live validation ingests real memories and executes filtered searches against Qdrant + Ollama.
 - M7: Polished MCP `search` ergonomics by accepting aliases (`type`/`project`/`k`), coercing scalar tags, returning a prompt-ready `context`, and echoing `used_filters`; documented schema defaults/examples and shipped unit coverage alongside live validation.
+- M8: Standardized error ergonomics for MCP `search`, including stringent input validation, actionable `invalid_params` messages, normalized responses with both `score_threshold` keys, JSON resource payloads (plus `mcp://rusty-mem/settings`), refreshed instructions, and live verification covering success, bad-input, and provider-failure paths.
 
-### M8 – Error Ergonomics & Instructions (Expanded)
-
-Assumptions (defaults and bounds)
-- `limit`: default 5, min 1, max 50.
-- `score_threshold`: default 0.25, range [0.0, 1.0].
-- `memory_type`: allowed values `episodic|semantic|procedural`.
-- `time_range`: `start`/`end` must be RFC3339; if both present, enforce `start <= end`.
-- Response fields use snake_case. Keep `scoreThreshold` alongside `score_threshold` for one release (deprecation in docs).
-- Resources return JSON with `mime_type = application/json`.
-
-Tasks
-- Search input validation in MCP layer (`src/mcp.rs`):
-  - `query_text` must be non-empty.
-  - `limit` within [1,50].
-  - `score_threshold` within [0.0,1.0].
-  - `memory_type`, if provided, must be in allowed set.
-  - `tags` must be an array of non-empty strings after alias coercion.
-  - `time_range` RFC3339 parsing for `start`/`end` and order check (`start <= end`).
-  - Violations return `invalid_params("…")` with concise remediation in the message.
-- Error mapping (rmcp):
-  - Embedding failures → `internal_error("Embedding provider error: …")`.
-  - Qdrant failures → `internal_error("Qdrant request failed: …")`.
-  - Dimension mismatch → `internal_error("Embedding dimension mismatch: expected X, got Y. Align EMBEDDING_MODEL and EMBEDDING_DIMENSION.")`.
-- Response shape normalization:
-  - Add `score_threshold` (snake_case) to top-level response; keep `scoreThreshold` during deprecation window.
-  - Ensure `used_filters` echoes validated values (normalized tags, original time strings).
-- Instructions refresh:
-  - Replace `ServerInfo.instructions` with a compact quickstart tailored for agent flows (see Quickstart copy below).
-- Resource MIME:
-  - Set `mime_type = application/json` for `memory-types`, `health`, `projects` resources.
-- Env knobs (tuning without code changes):
-  - Add optional env vars: `SEARCH_DEFAULT_LIMIT` (5), `SEARCH_MAX_LIMIT` (50), `SEARCH_DEFAULT_SCORE_THRESHOLD` (0.25).
-  - Expose effective values via new read-only MCP resource `mcp://rusty-mem/settings`.
-
-Acceptance Criteria
-- Invalid inputs return `invalid_params` with clear, actionable messages.
-- Upstream failures surface as `internal_error` with brief remediation hints.
-- `get_info.instructions` is concise and renders well in MCP hosts.
-- Resources advertise `application/json` and `settings` lists effective defaults/bounds.
-
-How to Test
-- Unit tests (MCP):
-  - Empty `query_text` → `invalid_params`.
-  - `limit` 0 and > max → `invalid_params` with bounds message.
-  - `score_threshold` < 0 or > 1 → `invalid_params`.
-  - Invalid `memory_type` → `invalid_params`.
-  - `tags` wrong type → `invalid_params`.
-  - `time_range.start`/`end` invalid RFC3339 → `invalid_params`.
-  - `time_range.start > end` → `invalid_params`.
-  - Response includes `score_threshold` and legacy `scoreThreshold`.
-- Resource tests:
-  - `mime_type` is `application/json`.
-  - `settings` resource returns effective defaults and bounds.
-- Live validation (mandatory):
-  - Start MCP (`cargo run --bin rusty_mem_mcp`), confirm Qdrant reachability via `health`.
-  - `push` a sample note and verify ingestion counters.
-  - `search` with valid filters → confirm `results`, `used_filters`, `context`, and threshold fields.
-  - Trigger each invalid case and verify `invalid_params` messages.
-  - Simulate embedding or Qdrant failures to verify `internal_error` messages.
-
-Expected Results
-- Friendlier failures that guide agents/users to fix calls quickly; predictable defaults that can be tuned via env.
-
-Quickstart (replace `ServerInfo.instructions`)
-- "Rusty Memory MCP
-  1) listResources({}) → readResource URIs (memory-types, health, projects)
-  2) listResourceTemplates({}) → fill mcp://rusty-mem/projects/{project_id}/tags
-  3) get-collections({}) → discover Qdrant collections
-  4) new-collection({ name, vector_size? }) → ensure collection/vector size
-  5) push({ text, project_id?, memory_type?, tags?, source_uri?, collection? })
-  6) search({ query_text, project_id?, memory_type?, tags?, time_range?, limit?, score_threshold?, collection? })
-  Invalid inputs return `invalid_params` with a short fix; all responses are structured JSON."
-
-Git Steps
-- Commit: `Standardize error ergonomics and update instructions`
-- Attach to PR: example MCP `search` JSON (in/out), transcript of Qdrant-enabled search, note confirming Ollama embeddings (when enabled), and list of env knobs used.
-
-### M9 – Summarize (Meta‑cognition)
+### M9 – Summarize (Meta-cognition)
 
 - Tasks
   - MCP `summarize`: consolidate time‑bounded episodic memories into a new semantic memory (tag `summary`).

@@ -6,19 +6,24 @@ This document explains every configuration option supported by Rusty Memory and 
 
 Rusty Memory reads its configuration from environment variables once at startup. The easiest way to manage them is to copy `.env.example` to `.env` and edit the values. The table below lists each variable, what it does, and typical values.
 
-| Variable                   | Description                                                                                                        | Example                           |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
-| `QDRANT_URL`               | Base URL for the Qdrant HTTP API.                                                                                  | `http://127.0.0.1:6333`           |
-| `QDRANT_COLLECTION_NAME`   | Default collection name used when `push` does not provide one.                                                     | `rusty-mem`                       |
-| `QDRANT_API_KEY`           | Optional API key for secured Qdrant deployments. Leave empty for local installs.                                   | `supersecretapikey`               |
-| `EMBEDDING_PROVIDER`       | Embedding backend. `ollama` enables the local client, anything else falls back to the deterministic encoder today. | `ollama`                          |
-| `EMBEDDING_MODEL`          | Free-form model identifier included in logs and used for chunk-size hints.                                         | `nomic-embed-text`                |
-| `OLLAMA_URL`               | Base URL for the Ollama runtime when `EMBEDDING_PROVIDER=ollama`. Defaults to `http://127.0.0.1:11434`.            | `http://127.0.0.1:11434`          |
-| `EMBEDDING_DIMENSION`      | Vector length expected by the target collection. Must match your embedding model’s output dimension.               | `768`                             |
-| `TEXT_SPLITTER_CHUNK_SIZE` | Optional chunk-size override. The server infers a model-aware value when unset.                                    | `1024`                            |
-| `SERVER_PORT`              | Optional fixed HTTP port. When unset, the server picks the first free port in `4100-4199`.                         | `4123`                            |
-| `RUSTY_MEM_LOG_FILE`       | Optional absolute path for structured logs. When omitted, logs go to `logs/rusty-mem.log`.                         | `/Users/you/rusty-mem.log`        |
-| `RUST_LOG`                 | Standard Rust logging filter if you need more or less verbosity.                                                   | `rusty_mem=debug,tower_http=info` |
+| Variable                         | Description                                                                                                        | Example                           |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
+| `QDRANT_URL`                     | Base URL for the Qdrant HTTP API.                                                                                  | `http://127.0.0.1:6333`           |
+| `QDRANT_COLLECTION_NAME`         | Default collection name used when `push` does not provide one.                                                     | `rusty-mem`                       |
+| `QDRANT_API_KEY`                 | Optional API key for secured Qdrant deployments. Leave empty for local installs.                                   | `supersecretapikey`               |
+| `EMBEDDING_PROVIDER`             | Embedding backend. `ollama` enables the local client, anything else falls back to the deterministic encoder today. | `ollama`                          |
+| `EMBEDDING_MODEL`                | Free-form model identifier included in logs and used for chunk-size hints.                                         | `nomic-embed-text`                |
+| `OLLAMA_URL`                     | Base URL for the Ollama runtime when `EMBEDDING_PROVIDER=ollama`. Defaults to `http://127.0.0.1:11434`.            | `http://127.0.0.1:11434`          |
+| `EMBEDDING_DIMENSION`            | Vector length expected by the target collection. Must match your embedding model’s output dimension.               | `768`                             |
+| `TEXT_SPLITTER_CHUNK_SIZE`       | Optional chunk-size override. The server infers a model-aware value when unset.                                    | `1024`                            |
+| `SEARCH_DEFAULT_LIMIT`           | Optional override for the default search `limit`. Must stay within `[1, SEARCH_MAX_LIMIT]`.                        | `5`                               |
+| `SEARCH_MAX_LIMIT`               | Upper bound for search results returned per request. Validation rejects calls above this value.                    | `50`                              |
+| `SEARCH_DEFAULT_SCORE_THRESHOLD` | Optional override for the default semantic score threshold applied to searches.                                    | `0.25`                            |
+| `SERVER_PORT`                    | Optional fixed HTTP port. When unset, the server picks the first free port in `4100-4199`.                         | `4123`                            |
+| `RUSTY_MEM_LOG_FILE`             | Optional absolute path for structured logs. When omitted, logs go to `logs/rusty-mem.log`.                         | `/Users/you/rusty-mem.log`        |
+| `RUST_LOG`                       | Standard Rust logging filter if you need more or less verbosity.                                                   | `rusty_mem=debug,tower_http=info` |
+
+When the MCP server is running you can call `readResource` on `mcp://rusty-mem/settings` to inspect the effective search defaults and limits that the process is enforcing.
 
 ### Enabling Ollama embeddings
 
