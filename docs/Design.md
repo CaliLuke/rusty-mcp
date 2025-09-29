@@ -1,6 +1,11 @@
 # Rusty Memory Architecture
 
-Rusty Memory is a Rust application that ingests plain-text documents, splits them into fixed-size chunks, produces deterministic embeddings, and stores the vectors in Qdrant. The project exposes the functionality both as an HTTP API and as a Model Context Protocol (MCP) server.
+Rusty Memory ingests raw text, produces semantic chunks with embeddings, and stores both vectors and metadata in Qdrant. The crate ships two primary surfaces:
+
+- **HTTP server (`rustymcp`)** for lightweight scripting.
+- **MCP server (`rusty_mem_mcp`)** optimized for editor/agent integrations.
+
+Both surfaces share the same processing layer, so ingestion, search, and summarization behave identically regardless of transport. Live environments typically pair Rusty Memory with Qdrant and Ollama, while tests fall back to deterministic stubs.
 
 ## High-level Flow
 
@@ -11,115 +16,110 @@ graph TD
         MCP[MCP hosts]
     end
 
-    subgraph "Rusty Memory"
-        Router[Axum router]
+    subgraph "Processing Pipeline"
         Processing[ProcessingService]
-        Chunker[Token chunker]
-        Embed[Deterministic embedding client]
-        QdrantWriter[Qdrant service]
-        Metrics[Ingestion metrics]
-        Config[Config singleton]
-        Logging[Tracing subscriber]
+        Sanitizer[Metadata sanitiser]
+        Chunker[Semantic chunker]
+        Embed[Embedding client]
+        QdrantClient[Qdrant service]
+        Summarizer[Summarisation client]
+        Metrics[Metrics registry]
     end
 
     subgraph "External Systems"
-        VectorDB[Qdrant]
+        Qdrant[Qdrant]
+        Ollama[Ollama / Provider API]
     end
 
-    HTTP --> Router --> Processing
+    HTTP --> Processing
     MCP --> Processing
-    Config --> Router
-    Config --> Processing
-    Processing --> Chunker --> Embed --> QdrantWriter --> VectorDB
+    Processing --> Sanitizer --> Chunker --> Embed --> QdrantClient --> Qdrant
+    Processing --> Summarizer --> QdrantClient
     Processing --> Metrics
-    Logging --> HTTP
-    Logging --> MCP
+    Embed --> Ollama
+    Summarizer --> Ollama
 ```
 
 ## Module Summary
 
-| Module                | Responsibility                                                                                                    |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `config`              | Loads environment-driven settings through `OnceLock` and exposes `Config`.                                        |
-| `logging`             | Sets up `tracing` subscribers, optionally writing to `RUSTY_MEM_LOG_FILE` or `logs/rusty-mem.log`.                |
-| `api`                 | Provides the Axum router and HTTP handlers for indexing, collection management, metrics, and the command catalog. |
-| `processing`          | Coordinates chunking, embedding, Qdrant operations, and ingestion metrics.                                        |
-| `embedding`           | Supplies a deterministic embedding client placeholder powered by project configuration.                           |
-| `qdrant`              | Wraps REST calls to Qdrant for collection management and point indexing.                                          |
-| `metrics`             | Holds atomic counters tracking ingested documents and chunks.                                                     |
-| `mcp`                 | Implements the MCP server (`RustyMemMcpServer`) and tool dispatch.                                                |
-| `bin/metrics_post.rs` | Post-processing helper used by `scripts/metrics.sh` to summarise analyzer outputs.                                |
+| Module / File           | Responsibility                                                                                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `config`                | Loads environment variables once and exposes a typed `Config`. Ensures derived defaults (chunk size, ports) are available globally.                          |
+| `logging`               | Configures `tracing` subscribers for stdout and optional file sinks.                                                                                         |
+| `api`                   | Axum HTTP surface exposing ingestion, collection management, metrics, and a discovery catalogue.                                                             |
+| `processing::service`   | Orchestrates ingestion, search, and summarisation on behalf of HTTP/MCP callers. Owns the embedding client, Qdrant client, and metrics registry.             |
+| `processing::chunking`  | Token-aware chunker that selects window sizes based on provider/model (with overrides).                                                                      |
+| `processing::sanitize`  | Normalises metadata (`project_id`, `memory_type`, `tags`, `source_uri`) and validates MCP payloads.                                                          |
+| `processing::mappers`   | Dedupe helpers, payload builders, and response mappers for Qdrant scored points.                                                                             |
+| `processing::summarize` | Extractive fallback, abstractive prompt construction, summary key derivation, and provenance tracking.                                                       |
+| `processing::types`     | Shared DTOs covering ingestion outcomes, search requests/results, and health checks.                                                                         |
+| `embedding`             | Embedding client factory supporting Ollama (live) with a deterministic fallback used in tests and offline modes.                                             |
+| `summarization`         | Summarisation client factory mirroring the embedding setup (Ollama by default, deterministic fallback otherwise).                                            |
+| `qdrant::client`        | Lightweight REST wrapper for collections, upserts, filtered search, and payload index bootstrapping.                                                         |
+| `qdrant::filters`       | Builders for Qdrant filters (project, memory type, tags, timestamp).                                                                                         |
+| `qdrant::payload`       | Universal payload construction (payload schema, chunk hashes, timestamps) and index summaries.                                                               |
+| `qdrant::types`         | Request/response structs mirroring the Qdrant REST shape.                                                                                                    |
+| `mcp/*`                 | MCP server implementation: tool schemas, format helpers, per-tool handlers (`index`, `search`, `summarize`, `metrics`, `collections`), and server bootstrap. |
+| `metrics`               | Atomic counters reporting documents, chunks, and last chunk size. Shared across surfaces.                                                                    |
+| `src/bin/*`             | Entry points (`rustymcp`, `rusty_mem_mcp`, `metrics_post`).                                                                                                  |
 
-## Document Processing Pipeline
+## Ingestion Pipeline
 
-1. Configuration is loaded once via `config::init_config()`; subsequent reads use the cached instance.
-2. The HTTP server binds to `SERVER_PORT` when provided or the first free port in `4100-4199`.
-3. `ProcessingService::process_and_index` performs the ingestion steps (and accepts optional metadata overrides so callers can set `project_id`, `memory_type`, `tags`, and `source_uri`):
-   - Split the document with `semchunk_rs::Chunker` using an automatically derived token budget (override with `TEXT_SPLITTER_CHUNK_SIZE` when needed).
-   - Generate deterministic embeddings for each chunk through `embedding::AiLibClient`. The current implementation hashes bytes into a normalised vector of length `EMBEDDING_DIMENSION`.
-   - Ensure the target Qdrant collection exists (`QdrantService::create_collection_if_not_exists`) and upload the chunks with randomly generated UUIDs, persisting metadata and dedupe counters (`inserted`, `updated`, `skipped_duplicates`).
-   - Update the `CodeMetrics` counters with the number of documents and chunks processed (even if dedupe skips all chunks).
-4. The MCP server reuses the same processing service instance, so the chunking and storage behaviour is identical across interfaces.
+1. **Configuration** – `ProcessingService::new` loads `Config`, ensures the primary collection exists, and provisions payload indexes (`project_id`, `memory_type`, `tags`, `timestamp`, `chunk_hash`).
+2. **Metadata sanitisation** – `ProcessingService::process_and_index` trims user-provided metadata, defaults missing values (`project_id = "default"`, `memory_type = "semantic"`), and coerces tags into a deduplicated array.
+3. **Chunking** – `determine_chunk_size` picks a window and overlap based on provider/model or explicit overrides. `chunk_text` produces token-aware chunks while tracking chunk size.
+4. **Embedding** – `EmbeddingClient` either calls Ollama (when configured) or uses the deterministic fallback to guarantee test reproducibility. The client enforces vector length consistency.
+5. **Qdrant upsert** – Payloads include UUID `memory_id`, source metadata, RFC3339 timestamps, and SHA-256 `chunk_hash`. Inserts return `inserted`, `updated`, and `skipped_duplicates` counters.
+6. **Metrics** – `CodeMetrics` increments document/chunk totals and records the effective chunk size, making MCP/HTTP metrics consistent.
 
-## Interfaces
+## Search Pipeline
 
-### HTTP API
+1. **Request normalisation** – MCP handlers coerce aliases (`project`, `type`, `k`) and scalar tags into the canonical `SearchRequest`.
+2. **Validation** – The request must include non-empty `query_text`; optional filters are range-checked (`limit`, `score_threshold`, timestamps).
+3. **Embedding the query** – The same embedding client generates the search vector, guaranteeing dimension alignment with stored points.
+4. **Filter construction** – `qdrant::filters::build_search_filter` composes payload filters based on project, memory type, tags (contains-any), and optional time range.
+5. **Qdrant search** – `QdrantService::search_points` issues the REST query with limit/threshold hints.
+6. **Response formatting** – `map_scored_point` builds `SearchHit`s that include metadata, score, and citation snippets. MCP responses also assemble a prompt-ready `context` string and echo applied filters.
 
-| Method & Path       | Description                                               | Request Body                                 | Success Response                                                                                       |
-| ------------------- | --------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `POST /index`       | Index a document into the default or provided collection. | `{ "text": string, "collection"?: string }`  | `200 OK` with `{ "chunks_indexed": number, "chunk_size": number }`.                                    |
-| `GET /collections`  | List available Qdrant collections.                        | _None_                                       | `200 OK` with `{ "collections": [string] }`.                                                           |
-| `POST /collections` | Create or resize a collection.                            | `{ "name": string, "vector_size"?: number }` | `200 OK` with empty JSON body.                                                                         |
-| `GET /metrics`      | Read cumulative ingestion counters.                       | _None_                                       | `200 OK` with `{ "documents_indexed": number, "chunks_indexed": number, "last_chunk_size"?: number }`. |
-| `GET /commands`     | Provide a machine-readable command catalog for MCP hosts. | _None_                                       | `200 OK` with structured command descriptors.                                                          |
+## Summarisation Pipeline
 
-All handlers return `500 Internal Server Error` with a descriptive message when the processing pipeline fails.
+1. **Argument normalisation** – The MCP `summarize` handler defaults the time window to the last 7 days (configurable), coerces tags, and tolerates scalar project/memory values.
+2. **Source retrieval** – A secondary search fetches candidate episodic memories within the requested window; results are ordered by timestamp.
+3. **Summary strategy** – When abstractive summarisation is available, the handler crafts a prompt containing the ordered memories, project context, and requested `summary_key`. When not, an extractive fallback concatenates key sentences under the configured word budget.
+4. **Persistence** – Successful summaries are re-ingested via the processing pipeline with `memory_type = "semantic"`, provenance (`source_memory_ids`), and a deterministic `summary_key` tag so replays are idempotent.
 
-### MCP Tools
+## MCP Surface
 
-`RustyMemMcpServer` advertises four tools:
+Rusty Memory exposes the following tools/resources through the MCP server:
 
-| Tool              | Purpose                                                    | Parameters                                                                                                                                             | Structured Result                                                                                                                                            |
-| ----------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `push` / `index`  | Index a document.                                          | `{ "text": string, "collection"?: string, "project_id"?: string, "memory_type"?: string, "tags"?: [string], "source_uri"?: string }` (required `text`) | `{ "status": "ok", "collection": string, "chunksIndexed": number, "chunkSize": number, "inserted": number, "updated": number, "skippedDuplicates": number }` |
-| `get-collections` | List Qdrant collections.                                   | `{}`                                                                                                                                                   | `{ "collections": [string] }`                                                                                                                                |
-| `new-collection`  | Create or update a collection with a specific vector size. | `{ "name": string, "vector_size"?: number }`                                                                                                           | `{ "status": "ok", "vectorSize": number }`                                                                                                                   |
-| `metrics`         | Return ingestion counters.                                 | `{}`                                                                                                                                                   | `{ "documentsIndexed": number, "chunksIndexed": number }`                                                                                                    |
+- Tools: `push`/`index`, `search`, `summarize`, `get-collections`, `new-collection`, `metrics`.
+- Resources: `memory-types`, `projects`, `projects/{project_id}/tags`, `health`, `settings`.
 
-During `initialize`, the server shares usage instructions that mirror the four-step workflow above.
+Each tool shares the `ProcessingService` instance, keeping behaviour aligned across transports and ensuring live validation exercises the full pipeline.
 
-## Configuration
+## HTTP Surface
 
-| Environment Variable       | Details                                                                                        |
-| -------------------------- | ---------------------------------------------------------------------------------------------- |
-| `QDRANT_URL`               | Base URL of the Qdrant REST API (e.g. `http://127.0.0.1:6333`).                                |
-| `QDRANT_COLLECTION_NAME`   | Default collection for `push` operations.                                                      |
-| `QDRANT_API_KEY`           | Optional API key forwarded via the `api-key` header.                                           |
-| `EMBEDDING_PROVIDER`       | Logical provider name (`ollama` or `openai`); stored for logging only today.                   |
-| `EMBEDDING_MODEL`          | Free-form model identifier included in logging.                                                |
-| `EMBEDDING_DIMENSION`      | Vector dimension used when creating collections and generating embeddings.                     |
-| `TEXT_SPLITTER_CHUNK_SIZE` | Optional chunk-size override. When omitted, the server infers a size from the embedding model. |
-| `SERVER_PORT`              | Optional fixed port for the HTTP server.                                                       |
-| `RUSTY_MEM_LOG_FILE`       | When set, directs structured logs to the provided path instead of `logs/rusty-mem.log`.        |
+The HTTP API focuses on ingestion and operations automation:
 
-The configuration module also honours provider-specific environment variables consumed by downstream tooling (for example, `OPENAI_API_KEY`).
+| Method & Path       | Description                                                                       |
+| ------------------- | --------------------------------------------------------------------------------- |
+| `POST /index`       | Chunk, embed, and index text with optional metadata and collection overrides.     |
+| `GET /collections`  | List managed Qdrant collections.                                                  |
+| `POST /collections` | Create or resize a collection (vector size inferred from config unless provided). |
+| `GET /metrics`      | Return document/chunk counters and the last chunk size.                           |
+| `GET /commands`     | Machine-readable catalogue describing the available HTTP endpoints.               |
 
-## Observability
-
-- **Logging:** `logging::init_tracing` installs a compact formatter to stdout and an optional non-blocking file appender. Log level defaults to `info` and respects `RUST_LOG` if provided.
-- **Metrics:** `metrics::CodeMetrics` exposes `metrics_snapshot`, including `last_chunk_size` for the most recent ingestion. The HTTP `/metrics` endpoint and the MCP tool return the same data. There is no Prometheus exporter yet.
-- **Reports:** `scripts/metrics.sh` can generate snapshots for coverage, complexity, debtmap, unused dependencies, and LOC. When `METRICS_SOFT=1`, outputs are written to a temporary directory; manual runs populate `reports/`.
+Search and summarisation are currently exposed only via MCP where most agent clients reside.
 
 ## Quality Gates
 
-- Documentation coverage is enforced via `#![deny(missing_docs)]`; missing Rustdoc blocks builds.
-- The verification script (`scripts/verify.sh`) runs formatting, clippy, tests, and doc builds. The Git hooks invoke this suite on every push, and a reduced version on commit.
-- The MCP integration test (`tests/mcp_integration.rs`) exercises initialization, tool listing, successful indexing, and validation of input errors.
-- The crate forbids `unsafe` code through policy; the geiger hook can be run manually if additional validation is required.
+- `scripts/verify.sh` orchestrates formatting, clippy, doc builds, and tests. Git hooks call `prek run`, which mirrors the CI fast path.
+- `tests/mcp_integration.rs` spins up a mock Qdrant server and validates MCP tool discovery, ingestion, search responses, and error ergonomics.
+- `tests/live_validation.rs` exercises the pipeline against live Qdrant/Ollama when those services are reachable.
+- The crate opts into `#![deny(missing_docs)]` for public APIs and forbids `unsafe` code.
 
 ## Future Enhancements
 
-- Replace the deterministic embedding stub with real provider calls using `ai-lib` transports.
-- Introduce semantics-aware chunking or adaptive chunk sizes to improve retrieval quality.
-- Add a search endpoint and a corresponding MCP tool that perform vector similarity queries against Qdrant.
-- Extend observability with Prometheus metrics and structured error notifications over MCP.
+- Switch the Qdrant client to gRPC (`qdrant-client`) once performance data justifies the migration.
+- Expand observability with Prometheus exporters and richer tracing spans for summarisation.
+- Investigate adaptive chunking based on document structure and token usage telemetry.
