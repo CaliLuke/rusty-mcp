@@ -6,7 +6,7 @@ use crate::qdrant::{
 };
 use anyhow::Error as TokenizerError;
 use semchunk_rs::Chunker;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 use tiktoken_rs::{
@@ -42,9 +42,9 @@ pub enum ProcessingError {
     /// Embedding provider failed to produce vectors for the input text.
     #[error("Failed to generate embeddings: {0}")]
     Embedding(#[from] crate::embedding::EmbeddingClientError),
-    /// Qdrant rejected an indexing operation.
-    #[error("Failed to index document: {0}")]
-    Indexing(#[from] QdrantError),
+    /// Qdrant interaction failed during ingestion or metadata queries.
+    #[error("Qdrant request failed: {0}")]
+    Qdrant(#[from] QdrantError),
 }
 
 /// Coordinates the full ingestion pipeline: semantic chunking, embedding, and Qdrant writes.
@@ -256,6 +256,29 @@ impl ProcessingService {
     pub async fn list_collections(&self) -> Result<Vec<String>, ProcessingError> {
         self.qdrant_service
             .list_collections()
+            .await
+            .map_err(ProcessingError::from)
+    }
+
+    /// Enumerate distinct project identifiers observed in the target collection.
+    pub async fn list_projects(
+        &self,
+        collection_name: &str,
+    ) -> Result<BTreeSet<String>, ProcessingError> {
+        self.qdrant_service
+            .list_projects(collection_name)
+            .await
+            .map_err(ProcessingError::from)
+    }
+
+    /// Enumerate distinct tags observed in the target collection, optionally scoped by project.
+    pub async fn list_tags(
+        &self,
+        collection_name: &str,
+        project_id: Option<&str>,
+    ) -> Result<BTreeSet<String>, ProcessingError> {
+        self.qdrant_service
+            .list_tags(collection_name, project_id)
             .await
             .map_err(ProcessingError::from)
     }

@@ -8,13 +8,15 @@ use rmcp::{
     ErrorData as McpError,
     handler::server::ServerHandler,
     model::{
-        AnnotateAble, CallToolRequestParam, CallToolResult, JsonObject, ListResourcesResult,
-        ListToolsResult, RawResource, ReadResourceRequestParam, ReadResourceResult, Resource,
-        ResourceContents, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
+        AnnotateAble, CallToolRequestParam, CallToolResult, JsonObject,
+        ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, RawResource,
+        RawResourceTemplate, ReadResourceRequestParam, ReadResourceResult, Resource,
+        ResourceContents, ResourceTemplate, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
     },
 };
-use serde::Deserialize;
+use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// MCP server implementation exposing Rusty Memory operations.
@@ -25,6 +27,10 @@ pub struct RustyMemMcpServer {
 
 const MEMORY_TYPES_URI: &str = "mcp://rusty-mem/memory-types";
 const HEALTH_URI: &str = "mcp://rusty-mem/health";
+const PROJECTS_URI: &str = "mcp://rusty-mem/projects";
+const PROJECT_TAGS_TEMPLATE_URI: &str = "mcp://rusty-mem/projects/{project_id}/tags";
+const PROJECT_TAGS_PREFIX: &str = "mcp://rusty-mem/projects/";
+const PROJECT_TAGS_SUFFIX: &str = "/tags";
 
 impl RustyMemMcpServer {
     /// Create a new MCP server using the supplied processing pipeline.
@@ -128,7 +134,30 @@ impl RustyMemMcpServer {
         health.description = Some("Live embedding configuration and Qdrant reachability".into());
         health.mime_type = Some("text".into());
 
-        vec![memory_types.no_annotation(), health.no_annotation()]
+        let mut projects = RawResource::new(PROJECTS_URI, "projects");
+        projects.description = Some("Distinct project_id values currently stored in Qdrant".into());
+        projects.mime_type = Some("text".into());
+
+        vec![
+            memory_types.no_annotation(),
+            health.no_annotation(),
+            projects.no_annotation(),
+        ]
+    }
+
+    fn describe_resource_templates(&self) -> Vec<ResourceTemplate> {
+        let tags_template = RawResourceTemplate {
+            uri_template: PROJECT_TAGS_TEMPLATE_URI.into(),
+            name: "project-tags".into(),
+            title: Some("Project Tags".into()),
+            description: Some(
+                "Enumerate distinct tags for a specific project: replace {project_id} and call readResource"
+                    .into(),
+            ),
+            mime_type: Some("text".into()),
+        };
+
+        vec![tags_template.no_annotation()]
     }
 }
 
@@ -146,7 +175,7 @@ impl ServerHandler for RustyMemMcpServer {
                 .build(),
             server_info: implementation,
             instructions: Some(
-                "Rusty Memory MCP usage:\n1. Call listResources({}) to discover read-only resources, then readResource each URI (e.g., mcp://rusty-mem/memory-types, mcp://rusty-mem/health) for supported metadata and health snapshots.\n2. Call get-collections to discover existing Qdrant collections (pass {}).\n3. To create or update a collection, call new-collection with { \"name\": <collection>, \"vector_size\": <optional dimension> }.\n4. Push content with push (or index) using { \"text\": <document>, \"collection\": <optional override>, \"project_id\": \"default\" (optional), \"memory_type\": \"semantic\" (optional), \"tags\": [<strings>], \"source_uri\": <string> }. Responses include `chunksIndexed`, `chunkSize`, `inserted`, `updated`, and `skippedDuplicates`.\n5. Inspect ingestion counters via metrics (pass {}) to confirm documents were processed; the result echoes `lastChunkSize`.\nAll tool responses return structured JSON; prefer the structured payload over the text summary.".into(),
+                "Rusty Memory MCP usage:\n1. Call listResources({}) to discover read-only resources, then readResource each URI (memory-types, health, projects).\n2. For tags, call listResourceTemplates({}) to obtain URI patterns such as mcp://rusty-mem/projects/{project_id}/tags, substitute the project_id, and invoke readResource.\n3. Call get-collections to discover existing Qdrant collections (pass {}).\n4. To create or update a collection, call new-collection with { \"name\": <collection>, \"vector_size\": <optional dimension> }.\n5. Push content with push (or index) using { \"text\": <document>, \"collection\": <optional override>, \"project_id\": \"default\" (optional), \"memory_type\": \"semantic\" (optional), \"tags\": [<strings>], \"source_uri\": <string> }. Responses include `chunksIndexed`, `chunkSize`, `inserted`, `updated`, and `skippedDuplicates`.\n6. Inspect ingestion counters via metrics (pass {}) to confirm documents were processed; the result echoes `lastChunkSize`.\nAll tool responses return structured JSON; prefer the structured payload over the text summary.".into(),
             ),
             ..ServerInfo::default()
         }
@@ -159,6 +188,16 @@ impl ServerHandler for RustyMemMcpServer {
     ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
         let resources = self.describe_resources();
         std::future::ready(Ok(ListResourcesResult::with_all_items(resources)))
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParam>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, McpError>> + Send + '_
+    {
+        let templates = self.describe_resource_templates();
+        std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(templates)))
     }
 
     fn list_tools(
@@ -198,6 +237,50 @@ impl ServerHandler for RustyMemMcpServer {
                                 &snapshot,
                             ),
                             HEALTH_URI,
+                        )],
+                    })
+                }
+                PROJECTS_URI => {
+                    let config = get_config();
+                    let projects = processing
+                        .list_projects(&config.qdrant_collection_name)
+                        .await
+                        .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+                    let payload = ProjectsSnapshot {
+                        projects: projects.into_iter().collect(),
+                    };
+                    Ok(ReadResourceResult {
+                        contents: vec![ResourceContents::text(
+                            serialize_json(&payload, PROJECTS_URI),
+                            PROJECTS_URI,
+                        )],
+                    })
+                }
+                other
+                    if other.starts_with(PROJECT_TAGS_PREFIX)
+                        && other.ends_with(PROJECT_TAGS_SUFFIX) =>
+                {
+                    let project_segment =
+                        &other[PROJECT_TAGS_PREFIX.len()..other.len() - PROJECT_TAGS_SUFFIX.len()];
+                    if project_segment.is_empty() {
+                        return Err(McpError::invalid_params(
+                            "Project identifier missing in resource URI",
+                            None,
+                        ));
+                    }
+                    let config = get_config();
+                    let tags = processing
+                        .list_tags(&config.qdrant_collection_name, Some(project_segment))
+                        .await
+                        .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+                    let payload = ProjectTagsSnapshot {
+                        project_id: project_segment.to_string(),
+                        tags: tags.into_iter().collect(),
+                    };
+                    Ok(ReadResourceResult {
+                        contents: vec![ResourceContents::text(
+                            serialize_json(&payload, other),
+                            other,
                         )],
                     })
                 }
@@ -324,6 +407,24 @@ fn parse_arguments<T: DeserializeOwned>(arguments: Option<JsonObject>) -> Result
         .unwrap_or_else(|| Value::Object(JsonObject::new()));
     serde_json::from_value(value)
         .map_err(|err| McpError::invalid_params(format!("Invalid arguments: {err}"), None))
+}
+
+fn serialize_json<T: Serialize>(value: &T, context_uri: &str) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|error| {
+        tracing::warn!(uri = context_uri, %error, "Failed to serialize JSON prettily");
+        serde_json::to_string(value).unwrap_or_else(|_| "{}".into())
+    })
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ProjectsSnapshot {
+    projects: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ProjectTagsSnapshot {
+    project_id: String,
+    tags: Vec<String>,
 }
 
 fn memory_types_payload() -> String {

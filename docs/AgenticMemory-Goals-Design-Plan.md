@@ -92,10 +92,12 @@ Key modules to evolve are listed with concrete responsibilities.
 ## Local Stack (Qdrant & Ollama)
 
 Baseline assumptions for all milestones:
+
 - Qdrant is already running locally and kept always‑on at `http://127.0.0.1:6333` (persistent storage). Do not include container start steps in milestone notes; only validate connectivity.
 - Ollama may be used for live embeddings when `EMBEDDING_PROVIDER=ollama`; start it only if not already running.
 
 Quick validations (use these before testing):
+
 - Qdrant: `curl -s http://127.0.0.1:6333/collections | jq .`
 - Ollama: `curl -s http://127.0.0.1:11434/api/tags | jq '.models[].name'`
 
@@ -139,55 +141,65 @@ Each milestone lists tasks, acceptance criteria, how to test, expected results, 
 <!-- Note: Baseline smoke checks and branch policy are consolidated under
      "Git Workflow & Release Checklist" and "Validation Protocol" below. -->
 
-### M1 – Status
+### Completed Milestones (M1–M5)
 
-✅ Completed. Processing now stamps each chunk with RFC3339 `timestamp` and deterministic `chunk_hash`, and Qdrant receives the expanded universal payload (`memory_id`, `project_id`, `memory_type`, `timestamp`, `chunk_hash`, `text`). Payload indexes for `project_id`, `memory_type`, `tags`, `timestamp`, and `chunk_hash` are provisioned during startup. `/index` and the MCP `push` tool remained backward compatible.
-
-### M2 – Status
-
-✅ Completed. Ollama is integrated as the primary embedding provider when `EMBEDDING_PROVIDER=ollama` (configurable via `OLLAMA_URL` and model env vars). The service validates vector dimensions, surfaces helpful connection errors, and falls back to the deterministic encoder for other providers. README/config docs updated; MCP integration test harness still mocks Qdrant, but all final validation was performed against live Ollama + Qdrant.
-
-### M3 – Status
-
-✅ Completed. `push`/`index` now accept optional metadata (`project_id`, `memory_type`, `tags`, `source_uri`) with defaults, intra-request dedupe is enforced before embedding, Qdrant payloads persist the overrides, and the ingestion outcome reports `inserted`, `updated`, and `skippedDuplicates` alongside `chunksIndexed`/`chunkSize`. Both HTTP `/index` and the MCP tool surface the richer response so clients see dedupe effects immediately.
-
-### M4 – MCP Resources (Memory Types, Health)
-
-✅ Completed. The MCP server now advertises the resources capability and returns `mcp://rusty-mem/memory-types` and `mcp://rusty-mem/health` via `listResources`, each served as JSON text when fetched through `readResource`. The memory-types snapshot enumerates the allowed values and default, while the health payload reports the live embedding configuration plus a Qdrant reachability probe (including default-collection presence and any error message). Host instructions and the README walk agents through `listResources`/`readResource`, and unit tests cover the resource serializers. Live validation: `cargo test --test live_validation -- --ignored --nocapture` (requires Qdrant at `http://127.0.0.1:6333` and Ollama at `http://127.0.0.1:11434`).
-
-### M5 – MCP Resources (Projects and Tags)
-
-- Tasks
-  - Add resources:
-    - `mcp://rusty-mem/projects`
-    - `mcp://rusty-mem/projects/{project_id}/tags`
-  - Implement snapshot helpers in `qdrant.rs` to enumerate distinct values (scoped for tags).
-
-- Acceptance Criteria
-  - `projects` returns at least one entry after ingestion; `.../tags` returns tags for a known project.
-  - Resource responses are read‑only and fast on small local datasets.
-
-- How to Test
-  - Ingest two docs with different `project_id` and tags; read both resources and confirm enumeration matches payloads.
-
-- Expected Results
-  - Agents can discover projects and tags to propose filters without new tool calls.
-
-- Git Steps
-  - Commit message: `Add MCP resources for projects and per‑project tags`
+- M1: Added RFC3339 `timestamp` and deterministic `chunk_hash`; expanded universal payload persisted to Qdrant. Created payload indexes for `project_id`, `memory_type`, `tags`, `timestamp`, `chunk_hash`. Kept `/index` and MCP `push` backward compatible.
+- M2: Integrated Ollama embeddings (`EMBEDDING_PROVIDER=ollama`), validated vector dimensions, and retained deterministic fallback. Performed live validation against Ollama + Qdrant.
+- M3: Enriched ingestion with optional metadata (`project_id`, `memory_type`, `tags`, `source_uri`) and intra-request dedupe. Responses now include `inserted`, `updated`, `skippedDuplicates`, `chunksIndexed`, `chunkSize` across HTTP and MCP.
+- M4: Exposed MCP resources for `mcp://rusty-mem/memory-types` and `mcp://rusty-mem/health` with JSON payloads; documented usage and added unit coverage. Live checks require reachable Qdrant (`http://127.0.0.1:6333`) and Ollama (`http://127.0.0.1:11434`).
+- M5: Added MCP resources for `mcp://rusty-mem/projects` and `mcp://rusty-mem/projects/{project_id}/tags`, backed by Qdrant scroll + payload indexes. Validated live (Ollama + Qdrant), and introduced `schemars` for derived resource schemas.
 
 ### M6 – Search (MCP, Minimal)
 
 - Tasks
-  - Extend `QdrantService` with `search_points` that issues `POST /collections/{collection}/points/search` (see [Qdrant Search API](https://api.qdrant.tech/v-1-15-x/api-reference/search/points)): serialize `{ "vector": <query>, "limit": <k>, "filter": { ... }, "with_payload": true }` and map responses to a Rust DTO containing `{ id, score, payload }`.
-  - Add a small filter builder (`build_search_filter`) that composes `must` clauses for optional fields:
-    - `project_id` and `memory_type` → `{"key": "…", "match": {"value": …}}`
-    - `tags` → `{"key": "tags", "match": {"any": [...]}}` (Qdrant payload match supports `any` per docs).
-    - `time_range` → `{"key": "timestamp", "range": {"gte": start, "lte": end}}`.
-  - Introduce `ProcessingService::search_memories` that (a) embeds `query_text` with the configured embedding client (single vector, dimension check), (b) calls `QdrantService::search_points`, (c) normalizes hits into `{ id, score, text, project_id, memory_type, tags, timestamp, source_uri }` records.
-  - Update `RustyMemMcpServer::describe_tools` to register a `search` tool with input schema `{ query_text, project_id?, memory_type?, tags?, time_range?: { start, end }, limit?, score_threshold?, collection? }` and implement the handler that delegates to `ProcessingService::search_memories`.
-  - Defaults: `limit=5`, `score_threshold=0.25`; omit optional filters by default.
-  - Keep ingestion (`push`) behavior unchanged; only add read paths. Re‑use the existing payload indexes (project_id/memory_type/tags/timestamp) created in M1.
+  - Qdrant integration (exact): Add `QdrantService::search_points` which performs `POST /collections/{collection}/points/query` with body:
+    ```json
+    {
+      "query": [0.1, 0.2, 0.3],
+      "limit": 5,
+      "with_payload": true,
+      "filter": { "must": [ /* composed below */ ] },
+      "score_threshold": 0.25,
+      "using": null
+    }
+    ```
+    - Headers: include `api-key: <QDRANT_API_KEY>` when configured.
+    - Response mapping: treat each hit as `{ id, score, payload }` (Qdrant returns scored points; the unified Query Points API wraps results under `result`).
+  - Filter builder (authoritative): Implement `build_search_filter(args) -> Option<serde_json::Value>` composing a `must` array with zero or more conditions:
+    - `project_id` → `{ "key": "project_id", "match": { "value": "<id>" } }`
+    - `memory_type` → `{ "key": "memory_type", "match": { "value": "episodic|semantic|procedural" } }`
+    - `tags` (contains-any) → `{ "key": "tags", "match": { "any": ["tag-a","tag-b"] } }`
+    - `time_range` (RFC3339) → `{ "key": "timestamp", "range": { "gte": "2025-01-01T00:00:00Z", "lte": "2025-12-31T23:59:59Z" } }`
+    Notes:
+    - Qdrant supports `match.any` for keyword arrays and `range` over datetimes when the field schema is `datetime` (we already create `timestamp` index as `datetime`).
+  - Processing layer: Add `ProcessingService::search_memories(args)` to:
+    1) Embed `query_text` with the configured client; assert returned vector length == `EMBEDDING_DIMENSION`.
+    2) Call `qdrant.search_points(collection, vector, filter, limit, score_threshold, using=None)`.
+    3) Map hits to a stable shape:
+       ```json
+       { "id": "<string>", "score": <number>, "text": "…", "project_id": "…", "memory_type": "…", "tags": ["…"], "timestamp": "…", "source_uri": "…" }
+       ```
+       Missing payload fields should be omitted or set to `null` in the output.
+  - MCP tool wiring: In `RustyMemMcpServer::describe_tools`, register `search` with an input schema exactly covering:
+    ```json
+    {
+      "type": "object",
+      "properties": {
+        "query_text": { "type": "string" },
+        "project_id": { "type": "string", "description": "Filter to a project" },
+        "memory_type": { "type": "string", "enum": ["episodic","semantic","procedural"] },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "time_range": { "type": "object", "properties": { "start": { "type": "string" }, "end": { "type": "string" } }, "required": [], "additionalProperties": false },
+        "limit": { "type": "integer", "minimum": 1, "default": 5 },
+        "score_threshold": { "type": "number", "default": 0.25 },
+        "collection": { "type": "string", "description": "Optional override; defaults to server collection" }
+      },
+      "required": ["query_text"],
+      "additionalProperties": false
+    }
+    ```
+    Also add a short example to the tool description and echo the canonical defaults in `get_info.instructions`.
+  - Defaults & invariants: `limit=5`, `score_threshold=0.25`, `tags` contains-any, omit `using` unless named vectors are introduced. Reuse existing payload indexes created in M1.
 
 - Acceptance Criteria
   - Issuing `search` with no filters returns top‑k results ordered by score and includes the stored payload fields (text, metadata).
@@ -196,10 +208,32 @@ Each milestone lists tasks, acceptance criteria, how to test, expected results, 
   - Error surfaces are actionable: empty `query_text` → `INVALID_PARAMS`; unreachable Qdrant → surfaced as MCP internal error with the upstream status text.
 
 - How to Test
-  - Live verification (mandatory): ingest at least two documents into Qdrant with different `project_id`, `memory_type`, and `tags`, then call the MCP `search` tool through Codex CLI or another host using real Ollama embeddings and a running Qdrant instance. Capture the exact commands and outputs in the PR notes.
-  - Unit tests: cover `build_search_filter` for each optional field (including combined filters) and ensure the produced JSON matches Qdrant’s schema; add a `search_points` happy-path test using `httpmock` to validate request body serialization and response parsing.
-  - Integration test: extend `tests/mcp_integration.rs` to perform an end-to-end search against the mock Qdrant server (verify handler wiring) but reiterate in comments that final manual checks must target the live service.
-  - Manual curl sanity (documented in PR): `curl -s http://localhost:6333/collections/<collection>/points/search -d '{"vector": [...], "limit": 3, "filter": {...}}' | jq` to confirm the Qdrant payload contract aligns with what the client sends.
+  - Live verification (mandatory): ingest at least two documents into Qdrant with different `project_id`, `memory_type`, and `tags`, then call the MCP `search` tool through Codex CLI or another host using real Ollama embeddings and a running Qdrant instance. Capture commands and outputs in PR notes.
+  - Unit tests: cover `build_search_filter` for each optional field (including combined filters). Verify exact JSON shapes:
+    ```json
+    { "filter": { "must": [ {"key":"project_id","match":{"value":"repo-a"}} ] } }
+    { "filter": { "must": [ {"key":"tags","match":{"any":["alpha","beta"]}} ] } }
+    { "filter": { "must": [ {"key":"timestamp","range":{"gte":"2025-01-01T00:00:00Z","lte":"2025-12-31T23:59:59Z"}} ] } }
+    ```
+    Add a `search_points` happy-path test using `httpmock` to validate request body serialization and minimal response parsing into `{id,score,payload}`.
+  - Integration test: extend `tests/mcp_integration.rs` to perform an end-to-end search against a mock Qdrant server (verifies handler wiring); reiterate that final manual checks must target live Qdrant+Ollama.
+  - Manual curl sanity (Qdrant ≥ v1.8 for datetime filters):
+    ```bash
+    curl -s http://localhost:6333/collections/<collection>/points/query \
+      -H 'Content-Type: application/json' \
+      -d '{
+        "query": [0.01,0.02,0.03],
+        "limit": 3,
+        "with_payload": true,
+        "filter": {
+          "must": [
+            {"key":"project_id","match":{"value":"default"}},
+            {"key":"tags","match":{"any":["architecture"]}},
+            {"key":"timestamp","range":{"gte":"2025-01-01T00:00:00Z","lte":"2025-12-31T23:59:59Z"}}
+          ]
+        }
+      }' | jq
+    ```
 
 - Expected Results
   - Search results include payload echoes (`text`, `project_id`, etc.) and deterministic scores from Qdrant.

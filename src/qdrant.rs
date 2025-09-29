@@ -3,6 +3,7 @@ use reqwest::{Client, Method, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -88,6 +89,45 @@ impl QdrantService {
             base_url,
             api_key: config.qdrant_api_key.clone(),
         })
+    }
+
+    /// Enumerate distinct project identifiers stored in the collection payloads.
+    pub async fn list_projects(&self, collection: &str) -> Result<BTreeSet<String>, QdrantError> {
+        let payloads = self
+            .scroll_payloads(collection, json!(["project_id"]), None)
+            .await?;
+        let mut projects = BTreeSet::new();
+        for payload in payloads {
+            accumulate_project_id(&payload, &mut projects);
+        }
+        Ok(projects)
+    }
+
+    /// Enumerate distinct tags stored in the collection payloads, optionally scoped by project.
+    pub async fn list_tags(
+        &self,
+        collection: &str,
+        project_id: Option<&str>,
+    ) -> Result<BTreeSet<String>, QdrantError> {
+        let filter = project_id.map(|project| {
+            json!({
+                "must": [
+                    {
+                        "key": "project_id",
+                        "match": { "value": project }
+                    }
+                ]
+            })
+        });
+
+        let payloads = self
+            .scroll_payloads(collection, json!(["tags"]), filter)
+            .await?;
+        let mut tags = BTreeSet::new();
+        for payload in payloads {
+            accumulate_tags(&payload, &mut tags);
+        }
+        Ok(tags)
     }
 
     /// Create a collection only when it is missing from Qdrant.
@@ -304,6 +344,63 @@ impl QdrantService {
             Err(error)
         }
     }
+
+    async fn scroll_payloads(
+        &self,
+        collection: &str,
+        with_payload: Value,
+        filter: Option<Value>,
+    ) -> Result<Vec<Map<String, Value>>, QdrantError> {
+        let mut offset: Option<Value> = None;
+        let mut payloads = Vec::new();
+        let filter_body = filter.unwrap_or_else(|| json!({ "must": [] }));
+
+        loop {
+            let mut body = json!({
+                "with_payload": with_payload.clone(),
+                "with_vector": false,
+                "limit": 512,
+                "offset": offset.clone().unwrap_or(Value::Null),
+                "filter": filter_body.clone(),
+            });
+
+            // Qdrant expects `offset` absent on the first call rather than null.
+            if offset.is_none() {
+                body.as_object_mut().unwrap().remove("offset");
+            }
+
+            let response = self
+                .request(
+                    Method::POST,
+                    &format!("collections/{collection}/points/scroll"),
+                )?
+                .json(&body)
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                let error = QdrantError::UnexpectedStatus { status, body };
+                tracing::error!(collection, error = %error, "Failed to scroll payloads");
+                return Err(error);
+            }
+
+            let ScrollResponse { result } = response.json().await?;
+            for point in result.points {
+                if let Some(payload) = point.payload {
+                    payloads.push(payload);
+                }
+            }
+
+            match result.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => break,
+            }
+        }
+
+        Ok(payloads)
+    }
 }
 
 fn normalize_base_url(url: &str) -> Result<String, String> {
@@ -408,6 +505,56 @@ struct CollectionDescription {
     name: String,
 }
 
+#[derive(Deserialize)]
+struct ScrollResponse {
+    result: ScrollResult,
+}
+
+#[derive(Deserialize)]
+struct ScrollResult {
+    #[serde(default)]
+    points: Vec<ScrollPoint>,
+    #[serde(default)]
+    next_page_offset: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct ScrollPoint {
+    #[serde(default)]
+    payload: Option<Map<String, Value>>,
+}
+
+fn accumulate_project_id(payload: &Map<String, Value>, projects: &mut BTreeSet<String>) {
+    if let Some(Value::String(project)) = payload.get("project_id") {
+        let trimmed = project.trim();
+        if !trimmed.is_empty() {
+            projects.insert(trimmed.to_string());
+        }
+    }
+}
+
+fn accumulate_tags(payload: &Map<String, Value>, tags: &mut BTreeSet<String>) {
+    match payload.get("tags") {
+        Some(Value::Array(values)) => {
+            for value in values {
+                if let Value::String(tag) = value {
+                    let trimmed = tag.trim();
+                    if !trimmed.is_empty() {
+                        tags.insert(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        Some(Value::String(tag)) => {
+            let trimmed = tag.trim();
+            if !trimmed.is_empty() {
+                tags.insert(trimmed.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +606,43 @@ mod tests {
         assert_eq!(tags.len(), 2);
         assert!(tags.iter().any(|tag| tag == "alpha"));
         assert!(tags.iter().any(|tag| tag == "beta"));
+    }
+
+    #[test]
+    fn accumulate_project_ignores_empty() {
+        let mut map = Map::new();
+        map.insert("project_id".into(), Value::String("   ".into()));
+        let mut projects = BTreeSet::new();
+        accumulate_project_id(&map, &mut projects);
+        assert!(projects.is_empty());
+
+        map.insert("project_id".into(), Value::String("repo-a".into()));
+        accumulate_project_id(&map, &mut projects);
+        assert_eq!(
+            projects.iter().collect::<Vec<_>>(),
+            vec![&"repo-a".to_string()]
+        );
+    }
+
+    #[test]
+    fn accumulate_tags_handles_arrays_and_strings() {
+        let mut map = Map::new();
+        map.insert(
+            "tags".into(),
+            Value::Array(vec![
+                Value::String("alpha".into()),
+                Value::String("".into()),
+            ]),
+        );
+        let mut tags = BTreeSet::new();
+        accumulate_tags(&map, &mut tags);
+        assert_eq!(tags.iter().collect::<Vec<_>>(), vec![&"alpha".to_string()]);
+
+        map.insert("tags".into(), Value::String(" beta  ".into()));
+        accumulate_tags(&map, &mut tags);
+        assert_eq!(
+            tags.iter().collect::<Vec<_>>(),
+            vec![&"alpha".to_string(), &"beta".to_string()]
+        );
     }
 }
