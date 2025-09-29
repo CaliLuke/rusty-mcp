@@ -1,3 +1,8 @@
+//! MCP server entrypoint (stdio transport).
+//!
+//! Launches an MCP server that exposes Rusty Memory’s tools and resources over stdio. This mode
+//! is designed for editor/agent integrations (Codex CLI, Kilo Code, etc.) and shares all runtime
+//! configuration with the HTTP binary.
 use anyhow::{Context, Result};
 use rmcp::{service::ServiceExt, transport::stdio};
 use rustymcp::{config, logging, mcp::RustyMemMcpServer, processing};

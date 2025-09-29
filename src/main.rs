@@ -1,3 +1,7 @@
+//! HTTP server entrypoint for Rusty Memory.
+//!
+//! This binary initializes configuration and logging, constructs the Axum router from the shared
+//! processing pipeline, and binds to `SERVER_PORT` or the first free port in `4100–4199`.
 use rustymcp::{api, config, logging, processing};
 use std::sync::Arc;
 use tokio::net::TcpListener;

@@ -154,18 +154,152 @@ Each milestone lists tasks, acceptance criteria, how to test, expected results, 
 
 ### M9 – Summarize (Meta-cognition)
 
-- Tasks
-  - MCP `summarize`: consolidate time‑bounded episodic memories into a new semantic memory (tag `summary`).
-  - Optional HTTP mirror later.
-- Acceptance Criteria
-  - Tool returns `{ summary, source_memory_ids }` and upserts a new semantic memory.
-- How to Test
-  - Create a few episodic entries across a time window; run `summarize`; ensure a new semantic memory is created and discoverable via search.
-  - Keep deterministic fallback for tests; Ollama can be toggled for local quality checks.
+Goal: Provide an MCP `summarize` tool that consolidates time‑bounded episodic memories into a new semantic memory, preserving provenance to the source episodic memories, and validating end‑to‑end against live services.
+
+- Scope
+  - Primary surface: MCP tool `summarize` (stdio transport only, consistent with MCP guidance).
+  - Optional mirror: HTTP `POST /summarize` added later after MCP stabilizes.
+
+- Design Directives
+  - Abstractive by default using a local LLM via Ollama when available; deterministic extractive fallback when the provider is disabled/unavailable.
+  - Additive changes only: extend the universal payload with optional provenance without breaking existing readers.
+  - Make the operation idempotent within a short window by hashing inputs to avoid duplicate summaries.
+  - Preserve search ergonomics: the resulting semantic memory must be discoverable via existing MCP `search` with filters (`project_id`, `memory_type=semantic`, `tags` contains `summary`).
+
+- Data Model Additions (additive)
+  - New optional field in the universal payload (persisted to Qdrant):
+    - `source_memory_ids?: string[]` – provenance of episodic memories consolidated into the summary.
+  - Tags convention:
+    - Append `"summary"` to `tags` for the new semantic memory.
+  - Idempotency key:
+    - Compute `summary_key = sha256(project_id + time_range.start + time_range.end + joined(source_memory_ids))` and store it as a tag (e.g., `summary:<hash>`), or as an additional optional payload field `summary_key?: string`. Prefer a tag for fast negative lookups.
+
+- MCP Tool: `summarize`
+  - Input schema (Serde + Schemars; see hints below):
+    - `{ project_id?: string, memory_type?: string = "episodic", tags?: string[] | string, time_range: { start: RFC3339, end: RFC3339 }, limit?: number = 50, strategy?: "auto" | "abstractive" | "extractive" = "auto", provider?: "ollama" | "none", model?: string, max_words?: number = 250, score_threshold?: number, collection?: string }`
+    - Notes:
+      - Coerce scalar `tags` to `[tags]` as done in M7 for `search`.
+      - `limit` caps the number of episodic memories considered before summarization.
+      - `strategy=auto` chooses `abstractive` if `SUMMARIZATION_PROVIDER` is available and healthy, else `extractive`.
+  - Output schema:
+    - `{ summary: string, source_memory_ids: string[], upserted_memory_id: string, used_filters: { ...echoed }, strategy: string, provider?: string, model?: string }`
+  - Errors (normalized like M8):
+    - `invalid_params` for bad/missing `time_range`, `limit <= 0`, or empty result set.
+    - `provider_unavailable` when `abstractive` is requested but Ollama is not reachable.
+    - `upsert_failed` if Qdrant write fails.
+
+- Implementation Plan (code‑level steps)
+  1) Qdrant query for episodic scope
+     - Build a filter with `must` conditions: `project_id`, `memory_type=episodic` (unless overridden), optional `tags` (contains‑any), and `timestamp` range.
+     - Reuse existing filter builders from M6/M7 to ensure parity.
+     - Sort by `timestamp` ascending and cap by `limit` (default 50).
+     - Hints (Context7 – Qdrant filters): see “Filter conditions (must/match/range)” and range examples.
+       - Library: /websites/api_qdrant_tech (Points search with filter)
+  2) Summarization pipeline
+     - Abstractive (Ollama):
+       - Compose a single prompt with a system directive and a compact bullet list of the selected episodic texts (with timestamps when available) to bound tokens.
+       - Call Ollama `POST /api/generate` with `{ model, prompt, stream: false }`.
+       - Hints (Context7 – Ollama API): use /ollama/ollama docs for `/api/generate` and `options`.
+     - Extractive fallback (deterministic):
+       - Strategy: take the first N sentences by chronological order subject to `max_words` and produce a concise bullet summary (e.g., top 3–5 bullets). Keep it pure Rust, no network.
+       - Minimal heuristic: split by sentence terminators, keep lines <= 180 chars, accumulate until `max_words`.
+  3) Upsert semantic summary
+     - Assemble universal payload with `memory_type=semantic`, `tags += ["summary"]`, `source_memory_ids = <episodic ids>` and optional `summary_key` tag for idempotency.
+     - Generate `memory_id = Uuid::new_v4()`.
+     - Reuse `index_points` to upsert the new memory in the current collection.
+  4) Idempotency guard
+     - Before upsert, perform a fast search in Qdrant for an existing point with tag `summary:<hash>` within the same `project_id` and `time_range`; if found, return that `memory_id` and existing `summary` text.
+  5) MCP tool wiring
+     - Add a new tool `summarize` to `src/mcp.rs` with the above input/output schema, using `schemars` for JSON Schema exposure and consistent error mapping like M8.
+     - Echo `used_filters` in the response to aid debugging.
+
+- Prompt Template (abstractive)
+  - System directive (prepend):
+    - “You summarize developer activity into concise, factual bullet points. Prefer neutral tone. Avoid speculation. Include dates if present. Return at most {max_words} words. Output a single paragraph.”
+  - User content (assembled):
+    - Header: “Summarize the following episodic notes for project ‘{project_id}’ between {start} and {end}.”
+    - Bullet list (trimmed/escaped) of episodic `text` values in chronological order; include short `YYYY‑MM‑DD` date prefix if available.
+
+- Env & Config
+  - New env vars (document in `docs/Configuration.md`):
+    - `SUMMARIZATION_PROVIDER=ollama|none` (default: `ollama` if reachable; else `none`).
+    - `SUMMARIZATION_MODEL` (e.g., `llama3.1:8b` or `mistral`), default falls back to `EMBEDDING_MODEL` family if sensible.
+    - `SUMMARIZATION_MAX_WORDS=250`.
+    - `OLLAMA_BASE_URL` (reuse if already present, else default `http://127.0.0.1:11434`).
+
+- Module/Code Changes (suggested layout)
+  - `src/summarize.rs` – Summarization orchestrator
+    - `summarize_episodic(project_id, tags, time_range, limit, strategy, provider, model, max_words) -> Result<SummaryResult>`
+    - Contains: episodic fetch, provider decision, prompt assembly, abstractive/extractive selection, idempotency hash computation.
+  - `src/llm/ollama.rs` – Lightweight API client (if not already present)
+    - `generate(prompt: &str, model: &str, max_tokens?: Option<u32>) -> Result<String>` via `reqwest` async, non‑streaming.
+  - `src/mcp.rs`
+    - Add `summarize` tool wiring; derive `JsonSchema` for input/output; use existing error type variants.
+  - `src/qdrant.rs`
+    - Add helper `find_summary_by_key(project_id, summary_key)` and reuse existing index/upsert helpers.
+
+- Context7 Doc Hints (implementation references)
+  - Ollama HTTP API (generate endpoint)
+    - Library: /ollama/ollama
+    - Example request: `POST /api/generate` with `{"model":"...","prompt":"...","stream":false}`
+    - Use `options` if you need to cap context length or set temperature.
+  - Reqwest JSON client (async)
+    - Library: /seanmonstar/reqwest
+    - Add deps: `reqwest = { version = "0.12", features=["json"] }`, `tokio = { version = "1", features=["full"] }`.
+    - Pattern: `Client::new().post(url).json(&payload).send().await?.error_for_status()?;`
+  - Qdrant filters and range
+    - Library: /websites/api_qdrant_tech
+    - Build `must` with `FieldCondition`/`MatchValue` for `project_id`, `memory_type`, and `Range` for `timestamp`.
+  - Schemars + Serde integration for tool schemas
+    - Library: /gresau/schemars
+    - `#[derive(Serialize, Deserialize, JsonSchema)]`, honor `#[serde(rename_all="camelCase")]`.
+  - UUID generation
+    - Library: /uuid-rs/uuid – use `Uuid::new_v4()`.
+
+- Extractive Fallback – Minimal Deterministic Algorithm
+  - Input: array of episodic `{text, timestamp}`.
+  - Steps: split text into sentences by `[.!?]`, trim, dedupe by `sha256(sentence)`, preserve chronological order, accumulate sentences until `max_words`, join with `. `.
+  - Advantages: zero dependencies, predictable output for tests.
+
+- Acceptance Criteria (expanded)
+  - Input validation: rejects missing/invalid `time_range` and `limit <= 0` with `invalid_params` and clear messages.
+  - Provider detection: `strategy=auto` yields `abstractive` with Ollama reachable; otherwise `extractive`.
+  - Summary upsert: produces one new semantic memory with tag `summary` and payload `source_memory_ids` and is retrievable by MCP `search`.
+  - Idempotency: repeated `summarize` with identical filters within the same dataset returns the existing summary (same `upserted_memory_id`).
+  - Response: includes `used_filters` and `strategy`.
+
+- How to Test (step‑by‑step)
+  1) Ingest episodic memories
+     - Use MCP `push` to index 3–5 episodic items within a small time window and `project_id=default` with tags `["note","daily"]`.
+  2) Run summarize (abstractive)
+     - Ensure Ollama is running and a small model is available (e.g., `llama3.1:8b`).
+     - Call MCP `summarize` with `time_range` covering the new memories, `strategy=auto`, `max_words=120`.
+     - Expect: non‑empty `summary`, `source_memory_ids` matches episodic IDs, `upserted_memory_id` present, `strategy="abstractive"`.
+  3) Verify search discoverability
+     - Call MCP `search` with `memory_type="semantic"`, `tags=["summary"]`, `project_id=default` and confirm the returned memory includes the upserted ID.
+  4) Idempotency check
+     - Repeat the same `summarize` call and verify `upserted_memory_id` is unchanged.
+  5) Fallback path
+     - Stop/disable Ollama or set `provider=none`, rerun `summarize` with `strategy=auto`; expect `strategy="extractive"` and a deterministic summary string.
+
 - Expected Results
-  - Summary quality acceptable on small local models; linkage to sources recorded.
+  - Abstractive path yields concise, coherent summaries with acceptable quality on small local models.
+  - Extractive fallback is stable across runs and bounded by `max_words`.
+  - Provenance recorded via `source_memory_ids` and idempotency via `summary:<hash>` tag or `summary_key` payload.
+
 - Git Steps
   - Commit message: `Add MCP summarize (episodic → semantic consolidation)`
+  - PR description should include: schema snippets, prompt example, `./scripts/verify.sh` output, and live validation commands run.
+
+- Sample MCP Payloads
+  - Request
+    - `{"project_id":"default","time_range":{"start":"2025-01-01T00:00:00Z","end":"2025-01-07T23:59:59Z"},"tags":["daily"],"limit":25,"strategy":"auto","max_words":150}`
+  - Response (shape)
+    - `{"summary":"...","source_memory_ids":["..."],"upserted_memory_id":"...","used_filters":{...},"strategy":"abstractive","provider":"ollama","model":"llama3.1:8b"}`
+
+Notes
+- This milestone adds an optional `source_memory_ids` and optional `summary_key` to the universal payload. Update `docs/Configuration.md` and, if you show payload examples elsewhere in this document, include these as optional fields.
+- Keep transport strictly stdio for MCP. Avoid introducing SSE/HTTP for clients; the server may use HTTP to call Ollama.
 
 ### M10 – Hardening & (Optional) gRPC Migration
 

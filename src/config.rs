@@ -1,3 +1,20 @@
+//! Environment-driven configuration for Rusty Memory.
+//!
+//! This module loads and validates settings once at startup (via `init_config`) and exposes
+//! a global, read‑only view through `get_config`. The configuration powers both the HTTP API and
+//! the MCP server and includes:
+//!
+//! - Qdrant connectivity (`QDRANT_URL`, `QDRANT_COLLECTION_NAME`, `QDRANT_API_KEY?`).
+//! - Embedding provider/model (`EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSION`,
+//!   `OLLAMA_URL?`).
+//! - Chunking overrides (`TEXT_SPLITTER_CHUNK_SIZE?`, `TEXT_SPLITTER_CHUNK_OVERLAP?`,
+//!   `TEXT_SPLITTER_USE_SAFE_DEFAULTS?`).
+//! - Search ergonomics (`SEARCH_DEFAULT_LIMIT?`, `SEARCH_MAX_LIMIT?`,
+//!   `SEARCH_DEFAULT_SCORE_THRESHOLD?`).
+//! - HTTP server port (`SERVER_PORT?`).
+//!
+//! Most fields are optional with sensible defaults; invalid combinations are flagged early with
+//! descriptive errors so misconfiguration is easy to diagnose.
 use serde::Deserialize;
 use std::env;
 use std::sync::OnceLock;
@@ -27,6 +44,10 @@ pub struct Config {
     pub embedding_provider: EmbeddingProvider,
     /// Optional override for the automatic chunk size selection.
     pub text_splitter_chunk_size: Option<usize>,
+    /// Optional overlap between sequential chunks produced by the splitter.
+    pub text_splitter_chunk_overlap: Option<usize>,
+    /// Opt-in flag enabling safer chunk-size defaults tuned for retrieval quality.
+    pub text_splitter_use_safe_defaults: bool,
     /// Embedding model identifier passed to the provider.
     pub embedding_model: String,
     /// Dimensionality of the produced vectors.
@@ -96,6 +117,17 @@ impl Config {
                     })
                 })
                 .transpose()?,
+            text_splitter_chunk_overlap: load_env_optional("TEXT_SPLITTER_CHUNK_OVERLAP")
+                .map(|value| {
+                    value.parse().map_err(|_| {
+                        ConfigError::InvalidValue("TEXT_SPLITTER_CHUNK_OVERLAP".to_string())
+                    })
+                })
+                .transpose()?,
+            text_splitter_use_safe_defaults: load_bool_with_default(
+                "TEXT_SPLITTER_USE_SAFE_DEFAULTS",
+                false,
+            )?,
             embedding_model: load_env("EMBEDDING_MODEL")?,
             embedding_dimension: load_env("EMBEDDING_DIMENSION")?.parse().map_err(|_| {
                 ConfigError::MissingVariable("Invalid EMBEDDING_DIMENSION".to_string())
@@ -129,6 +161,17 @@ fn load_f32_with_default(key: &str, default: f32) -> Result<f32, ConfigError> {
         Some(value) => value
             .parse()
             .map_err(|_| ConfigError::InvalidValue(key.to_string())),
+        None => Ok(default),
+    }
+}
+
+fn load_bool_with_default(key: &str, default: bool) -> Result<bool, ConfigError> {
+    match load_env_optional(key) {
+        Some(value) => match value.to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err(ConfigError::InvalidValue(key.to_string())),
+        },
         None => Ok(default),
     }
 }

@@ -1,103 +1,24 @@
-use crate::config::get_config;
-use reqwest::{Client, Method, StatusCode, Url};
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
-use thiserror::Error;
-use time::OffsetDateTime;
-use uuid::Uuid;
+//! HTTP client wrapper for interacting with Qdrant.
 
-/// Errors returned while interacting with Qdrant.
-#[derive(Debug, Error)]
-pub enum QdrantError {
-    /// Base URL failed to parse or normalize.
-    #[error("Invalid Qdrant URL: {0}")]
-    InvalidUrl(String),
-    /// HTTP layer failed before receiving a response.
-    #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
-    /// Qdrant responded with an unexpected status code.
-    #[error("Unexpected Qdrant response ({status}): {body}")]
-    UnexpectedStatus {
-        /// HTTP status returned from Qdrant.
-        status: StatusCode,
-        /// Body payload associated with the failing response.
-        body: String,
+use crate::config::get_config;
+use crate::qdrant::types::PayloadOverrides;
+use crate::qdrant::{
+    filters::{accumulate_project_id, accumulate_tags},
+    payload::{build_payload, current_timestamp_rfc3339, generate_memory_id},
+    types::{
+        IndexSummary, ListCollectionsResponse, QdrantError, QueryResponse, QueryResponseResult,
+        ScoredPoint, ScrollResponse,
     },
-}
+};
+use reqwest::{Client, Method, StatusCode};
+use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
 
 /// Lightweight HTTP client for Qdrant operations.
 pub struct QdrantService {
-    client: Client,
-    base_url: String,
-    api_key: Option<String>,
-}
-
-/// Optional metadata fields propagated into each Qdrant payload.
-#[derive(Debug, Clone, Default)]
-pub struct PayloadOverrides {
-    /// Override for the `project_id` field.
-    pub project_id: Option<String>,
-    /// Override for the `memory_type` field.
-    pub memory_type: Option<String>,
-    /// Tags attached to each chunk for filterable metadata.
-    pub tags: Option<Vec<String>>,
-    /// Optional URI describing the chunk source.
-    pub source_uri: Option<String>,
-}
-
-/// Prepared point ready for indexing, including text, hash, and vector.
-#[derive(Debug, Clone)]
-pub struct PointInsert {
-    /// Raw chunk text.
-    pub text: String,
-    /// Deterministic hash of the chunk used for dedupe.
-    pub chunk_hash: String,
-    /// Embedding vector produced for the chunk.
-    pub vector: Vec<f32>,
-}
-
-/// Filters that can be applied to Qdrant search queries.
-#[derive(Debug, Default, Clone)]
-pub struct SearchFilterArgs {
-    /// Exact match constraint for the `project_id` payload field.
-    pub project_id: Option<String>,
-    /// Exact match constraint for the `memory_type` payload field.
-    pub memory_type: Option<String>,
-    /// Contains-any constraint for the `tags` payload field.
-    pub tags: Option<Vec<String>>,
-    /// Timestamp boundaries applied to the `timestamp` payload field.
-    pub time_range: Option<SearchTimeRange>,
-}
-
-/// Inclusive timestamp boundaries expressed in RFC3339.
-#[derive(Debug, Default, Clone)]
-pub struct SearchTimeRange {
-    /// Inclusive start timestamp (`gte`).
-    pub start: Option<String>,
-    /// Inclusive end timestamp (`lte`).
-    pub end: Option<String>,
-}
-
-/// Scored payload returned by Qdrant queries.
-#[derive(Debug, Clone)]
-pub struct ScoredPoint {
-    /// Identifier assigned to the vector.
-    pub id: String,
-    /// Similarity score computed by Qdrant.
-    pub score: f32,
-    /// Optional payload associated with the vector.
-    pub payload: Option<Map<String, Value>>,
-}
-
-/// Summary describing how Qdrant applied an indexing request.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct IndexSummary {
-    /// Number of new vectors inserted by the request.
-    pub inserted: usize,
-    /// Number of vectors updated in place.
-    pub updated: usize,
+    pub(crate) client: Client,
+    pub(crate) base_url: String,
+    pub(crate) api_key: Option<String>,
 }
 
 impl QdrantService {
@@ -232,7 +153,7 @@ impl QdrantService {
     pub async fn index_points(
         &self,
         collection_name: &str,
-        points: Vec<PointInsert>,
+        points: Vec<crate::qdrant::types::PointInsert>,
         overrides: &PayloadOverrides,
     ) -> Result<IndexSummary, QdrantError> {
         if points.is_empty() {
@@ -243,7 +164,7 @@ impl QdrantService {
         let serialized: Vec<_> = points
             .into_iter()
             .map(|point| {
-                let memory_id = Uuid::new_v4().to_string();
+                let memory_id = generate_memory_id();
                 let payload =
                     build_payload(&memory_id, &point.text, &now, &point.chunk_hash, overrides);
                 json!({
@@ -354,7 +275,6 @@ impl QdrantService {
 
     /// Ensure standard payload indexes exist for common filters.
     pub async fn ensure_payload_indexes(&self, collection_name: &str) -> Result<(), QdrantError> {
-        // Fields and their schemas to index.
         let fields: [(&str, &str); 5] = [
             ("project_id", "keyword"),
             ("memory_type", "keyword"),
@@ -375,7 +295,6 @@ impl QdrantService {
                 .send()
                 .await?;
 
-            // 2xx is success; 409 conflict means already exists in some versions — treat as ok.
             if response.status().is_success() {
                 tracing::debug!(
                     collection = collection_name,
@@ -469,7 +388,6 @@ impl QdrantService {
                 "filter": filter_body.clone(),
             });
 
-            // Qdrant expects `offset` absent on the first call rather than null.
             if offset.is_none() {
                 body.as_object_mut().unwrap().remove("offset");
             }
@@ -509,7 +427,7 @@ impl QdrantService {
 }
 
 fn normalize_base_url(url: &str) -> Result<String, String> {
-    let mut parsed = Url::parse(url).map_err(|err| err.to_string())?;
+    let mut parsed = reqwest::Url::parse(url).map_err(|err| err.to_string())?;
     let path = parsed.path().trim_end_matches('/').to_string();
     parsed.set_path(&path);
     Ok(parsed.to_string())
@@ -519,134 +437,6 @@ fn format_endpoint(base: &str, path: &str) -> String {
     let base = base.trim_end_matches('/');
     let path = path.trim_start_matches('/');
     format!("{base}/{path}")
-}
-
-/// Compose the standard Qdrant filter payload from optional search arguments.
-pub fn build_search_filter(args: &SearchFilterArgs) -> Option<Value> {
-    let mut must: Vec<Value> = Vec::new();
-
-    if let Some(project_id) = args.project_id.as_ref().and_then(|value| non_empty(value)) {
-        must.push(json!({
-            "key": "project_id",
-            "match": { "value": project_id }
-        }));
-    }
-
-    if let Some(memory_type) = args.memory_type.as_ref().and_then(|value| non_empty(value)) {
-        must.push(json!({
-            "key": "memory_type",
-            "match": { "value": memory_type }
-        }));
-    }
-
-    if let Some(tags) = args.tags.as_ref() {
-        let cleaned: Vec<String> = tags
-            .iter()
-            .filter_map(|tag| non_empty(tag).map(|value| value.to_string()))
-            .collect();
-        if !cleaned.is_empty() {
-            must.push(json!({
-                "key": "tags",
-                "match": { "any": cleaned }
-            }));
-        }
-    }
-
-    if let Some(range) = args.time_range.as_ref() {
-        let mut boundaries = Map::new();
-        if let Some(start) = range.start.as_ref().and_then(|value| non_empty(value)) {
-            boundaries.insert("gte".into(), Value::String(start.to_string()));
-        }
-        if let Some(end) = range.end.as_ref().and_then(|value| non_empty(value)) {
-            boundaries.insert("lte".into(), Value::String(end.to_string()));
-        }
-        if !boundaries.is_empty() {
-            must.push(json!({
-                "key": "timestamp",
-                "range": Value::Object(boundaries)
-            }));
-        }
-    }
-
-    if must.is_empty() {
-        None
-    } else {
-        Some(json!({ "must": must }))
-    }
-}
-
-fn build_payload(
-    memory_id: &str,
-    text: &str,
-    timestamp_rfc3339: &str,
-    chunk_hash: &str,
-    overrides: &PayloadOverrides,
-) -> Value {
-    let mut payload = Map::new();
-    payload.insert("memory_id".into(), Value::String(memory_id.to_string()));
-    payload.insert(
-        "project_id".into(),
-        Value::String(
-            overrides
-                .project_id
-                .clone()
-                .unwrap_or_else(default_project_id),
-        ),
-    );
-    payload.insert(
-        "memory_type".into(),
-        Value::String(
-            overrides
-                .memory_type
-                .clone()
-                .unwrap_or_else(default_memory_type),
-        ),
-    );
-    payload.insert(
-        "timestamp".into(),
-        Value::String(timestamp_rfc3339.to_string()),
-    );
-    payload.insert("chunk_hash".into(), Value::String(chunk_hash.to_string()));
-    payload.insert("text".into(), Value::String(text.to_string()));
-
-    if let Some(source_uri) = overrides
-        .source_uri
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
-        payload.insert("source_uri".into(), Value::String(source_uri.clone()));
-    }
-
-    if let Some(tags) = overrides.tags.as_ref().filter(|tags| !tags.is_empty()) {
-        payload.insert(
-            "tags".into(),
-            Value::Array(tags.iter().map(|tag| Value::String(tag.clone())).collect()),
-        );
-    }
-
-    Value::Object(payload)
-}
-
-/// Compute a deterministic SHA-256 hash for the chunk text.
-pub fn compute_chunk_hash(text: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
-    let digest = hasher.finalize();
-    hex::encode(digest)
-}
-
-fn current_timestamp_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
-}
-
-fn default_project_id() -> String {
-    "default".to_string()
-}
-
-fn default_memory_type() -> String {
-    "semantic".to_string()
 }
 
 fn stringify_point_id(id: Value) -> String {
@@ -665,278 +455,17 @@ fn stringify_point_id(id: Value) -> String {
     }
 }
 
-fn non_empty(input: &str) -> Option<&str> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
-#[derive(Deserialize)]
-struct ListCollectionsResponse {
-    result: ListCollectionsResult,
-}
-
-#[derive(Deserialize)]
-struct ListCollectionsResult {
-    collections: Vec<CollectionDescription>,
-}
-
-#[derive(Deserialize)]
-struct CollectionDescription {
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct QueryResponse {
-    result: QueryResponseResult,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum QueryResponseResult {
-    Points(Vec<QueryPoint>),
-    Object {
-        #[serde(default)]
-        points: Vec<QueryPoint>,
-        #[serde(default)]
-        _count: Option<usize>,
-    },
-}
-
-#[derive(Deserialize)]
-struct QueryPoint {
-    id: Value,
-    score: f32,
-    #[serde(default)]
-    payload: Option<Map<String, Value>>,
-}
-
-#[derive(Deserialize)]
-struct ScrollResponse {
-    result: ScrollResult,
-}
-
-#[derive(Deserialize)]
-struct ScrollResult {
-    #[serde(default)]
-    points: Vec<ScrollPoint>,
-    #[serde(default)]
-    next_page_offset: Option<Value>,
-}
-
-#[derive(Deserialize)]
-struct ScrollPoint {
-    #[serde(default)]
-    payload: Option<Map<String, Value>>,
-}
-
-fn accumulate_project_id(payload: &Map<String, Value>, projects: &mut BTreeSet<String>) {
-    if let Some(Value::String(project)) = payload.get("project_id") {
-        let trimmed = project.trim();
-        if !trimmed.is_empty() {
-            projects.insert(trimmed.to_string());
-        }
-    }
-}
-
-fn accumulate_tags(payload: &Map<String, Value>, tags: &mut BTreeSet<String>) {
-    match payload.get("tags") {
-        Some(Value::Array(values)) => {
-            for value in values {
-                if let Value::String(tag) = value {
-                    let trimmed = tag.trim();
-                    if !trimmed.is_empty() {
-                        tags.insert(trimmed.to_string());
-                    }
-                }
-            }
-        }
-        Some(Value::String(tag)) => {
-            let trimmed = tag.trim();
-            if !trimmed.is_empty() {
-                tags.insert(trimmed.to_string());
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use httpmock::{Method::POST, MockServer};
     use reqwest::Client;
-    use serde_json::json;
-
-    #[test]
-    fn chunk_hash_is_stable() {
-        let text = "Hello world";
-        let h1 = compute_chunk_hash(text);
-        let h2 = compute_chunk_hash(text);
-        assert_eq!(h1, h2);
-        assert!(!h1.is_empty());
-    }
-
-    #[test]
-    fn timestamp_is_rfc3339_like() {
-        let ts = current_timestamp_rfc3339();
-        assert!(ts.contains('T') && ts.ends_with('Z'));
-    }
-
-    #[test]
-    fn payload_includes_defaults_and_text() {
-        let id = Uuid::new_v4().to_string();
-        let now = "2025-01-01T00:00:00Z";
-        let chunk_hash = "abc123";
-        let payload = build_payload(&id, "sample", now, chunk_hash, &PayloadOverrides::default());
-        assert_eq!(payload["memory_id"], id);
-        assert_eq!(payload["project_id"], default_project_id());
-        assert_eq!(payload["memory_type"], default_memory_type());
-        assert_eq!(payload["timestamp"], now);
-        assert_eq!(payload["text"], "sample");
-        assert_eq!(payload["chunk_hash"], chunk_hash);
-    }
-
-    #[test]
-    fn payload_applies_overrides() {
-        let id = Uuid::new_v4().to_string();
-        let now = "2025-01-01T00:00:00Z";
-        let overrides = PayloadOverrides {
-            project_id: Some("proj".into()),
-            memory_type: Some("episodic".into()),
-            tags: Some(vec!["alpha".into(), "beta".into()]),
-            source_uri: Some("file://doc".into()),
-        };
-        let payload = build_payload(&id, "sample", now, "hash", &overrides);
-        assert_eq!(payload["project_id"], "proj");
-        assert_eq!(payload["memory_type"], "episodic");
-        assert_eq!(payload["source_uri"], "file://doc");
-        let tags = payload["tags"].as_array().expect("tags present");
-        assert_eq!(tags.len(), 2);
-        assert!(tags.iter().any(|tag| tag == "alpha"));
-        assert!(tags.iter().any(|tag| tag == "beta"));
-    }
-
-    #[test]
-    fn accumulate_project_ignores_empty() {
-        let mut map = Map::new();
-        map.insert("project_id".into(), Value::String("   ".into()));
-        let mut projects = BTreeSet::new();
-        accumulate_project_id(&map, &mut projects);
-        assert!(projects.is_empty());
-
-        map.insert("project_id".into(), Value::String("repo-a".into()));
-        accumulate_project_id(&map, &mut projects);
-        assert_eq!(
-            projects.iter().collect::<Vec<_>>(),
-            vec![&"repo-a".to_string()]
-        );
-    }
-
-    #[test]
-    fn accumulate_tags_handles_arrays_and_strings() {
-        let mut map = Map::new();
-        map.insert(
-            "tags".into(),
-            Value::Array(vec![
-                Value::String("alpha".into()),
-                Value::String("".into()),
-            ]),
-        );
-        let mut tags = BTreeSet::new();
-        accumulate_tags(&map, &mut tags);
-        assert_eq!(tags.iter().collect::<Vec<_>>(), vec![&"alpha".to_string()]);
-
-        map.insert("tags".into(), Value::String(" beta  ".into()));
-        accumulate_tags(&map, &mut tags);
-        assert_eq!(
-            tags.iter().collect::<Vec<_>>(),
-            vec![&"alpha".to_string(), &"beta".to_string()]
-        );
-    }
-
-    #[test]
-    fn build_search_filter_handles_project_id() {
-        let filter = build_search_filter(&SearchFilterArgs {
-            project_id: Some("repo-a".into()),
-            ..Default::default()
-        })
-        .expect("filter");
-
-        assert_eq!(
-            filter,
-            json!({
-                "must": [
-                    {
-                        "key": "project_id",
-                        "match": { "value": "repo-a" }
-                    }
-                ]
-            })
-        );
-    }
-
-    #[test]
-    fn build_search_filter_handles_tags() {
-        let filter = build_search_filter(&SearchFilterArgs {
-            tags: Some(vec!["alpha".into(), "beta".into()]),
-            ..Default::default()
-        })
-        .expect("filter");
-
-        assert_eq!(
-            filter,
-            json!({
-                "must": [
-                    {
-                        "key": "tags",
-                        "match": { "any": ["alpha", "beta"] }
-                    }
-                ]
-            })
-        );
-    }
-
-    #[test]
-    fn build_search_filter_handles_time_range() {
-        let filter = build_search_filter(&SearchFilterArgs {
-            time_range: Some(SearchTimeRange {
-                start: Some("2025-01-01T00:00:00Z".into()),
-                end: Some("2025-12-31T23:59:59Z".into()),
-            }),
-            ..Default::default()
-        })
-        .expect("filter");
-
-        assert_eq!(
-            filter,
-            json!({
-                "must": [
-                    {
-                        "key": "timestamp",
-                        "range": {
-                            "gte": "2025-01-01T00:00:00Z",
-                            "lte": "2025-12-31T23:59:59Z"
-                        }
-                    }
-                ]
-            })
-        );
-    }
-
-    #[test]
-    fn build_search_filter_returns_none_when_empty() {
-        assert!(build_search_filter(&SearchFilterArgs::default()).is_none());
-    }
 
     #[tokio::test]
     async fn search_points_emits_expected_request() {
         let server = MockServer::start_async().await;
 
-        let filter = build_search_filter(&SearchFilterArgs {
+        let filter = crate::qdrant::build_search_filter(&crate::qdrant::SearchFilterArgs {
             project_id: Some("repo-a".into()),
             tags: Some(vec!["alpha".into(), "beta".into()]),
             ..Default::default()

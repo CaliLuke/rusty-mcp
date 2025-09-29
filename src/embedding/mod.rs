@@ -1,3 +1,14 @@
+//! Embedding client abstraction and provider adapters.
+//!
+//! Rusty Memory currently supports two modes:
+//!
+//! - `EmbeddingProvider::Ollama` – Real embeddings fetched from a local Ollama runtime
+//!   (`OLLAMA_URL`, `EMBEDDING_MODEL`). Dimensions are validated against `EMBEDDING_DIMENSION`.
+//! - `EmbeddingProvider::OpenAI` (and other values) – A deterministic fallback encoder that
+//!   produces stable, normalized vectors of length `EMBEDDING_DIMENSION`. This keeps the
+//!   end‑to‑end pipeline testable without external credentials.
+//!
+//! The concrete provider is selected at runtime by `get_embedding_client()` based on configuration.
 use crate::config::{EmbeddingProvider, get_config};
 use async_trait::async_trait;
 use ollama_rs::Ollama;
@@ -205,6 +216,13 @@ impl EmbeddingClient for OllamaClient {
 }
 
 /// Build an embedding client suitable for the current configuration.
+///
+/// - When `EMBEDDING_PROVIDER=ollama`, constructs an `OllamaClient` pointed at `OLLAMA_URL`
+///   (or the default `http://127.0.0.1:11434`).
+/// - Otherwise returns the deterministic `AiLibClient`.
+///
+/// Errors during Ollama client initialization are surfaced as a process panic because the binary
+/// cannot function without a working embedding backend in that mode.
 pub fn get_embedding_client() -> Box<dyn EmbeddingClient + Send + Sync> {
     let config = get_config();
     match config.embedding_provider {
