@@ -364,8 +364,7 @@ fn starts_with_whitespace(text: &str) -> bool {
 
 fn ends_with_whitespace(text: &str) -> bool {
     text.chars()
-        .rev()
-        .next()
+        .next_back()
         .map(|c| c.is_whitespace())
         .unwrap_or(false)
 }

@@ -8,6 +8,7 @@ pub mod collections;
 pub mod index;
 pub mod metrics;
 pub mod search;
+pub mod summarize;
 
 /// Parse structured arguments supplied to a tool invocation.
 pub(crate) fn parse_arguments<T: DeserializeOwned>(

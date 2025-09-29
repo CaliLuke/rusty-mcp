@@ -38,9 +38,7 @@ pub fn sanitize_memory_type(value: Option<String>) -> Option<String> {
 pub fn sanitize_tags(values: Option<Vec<String>>) -> Option<Vec<String>> {
     let mut unique = HashSet::new();
     let mut sanitized = Vec::new();
-    let Some(items) = values else {
-        return None;
-    };
+    let items = values?;
 
     for tag in items {
         let trimmed = tag.trim();
@@ -97,6 +95,8 @@ pub(crate) fn to_payload_overrides(metadata: IngestMetadata) -> PayloadOverrides
         memory_type: sanitize_memory_type(memory_type),
         tags: sanitize_tags(tags),
         source_uri: sanitize_string(source_uri),
+        source_memory_ids: None,
+        summary_key: None,
     }
 }
 

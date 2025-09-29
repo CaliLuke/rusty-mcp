@@ -2,7 +2,7 @@
 
 use crate::{
     config::EmbeddingProvider,
-    processing::{QdrantHealthSnapshot, SearchHit},
+    processing::{QdrantHealthSnapshot, SearchHit, SummarizeOutcome},
 };
 use rmcp::model::ResourceContents;
 use schemars::JsonSchema;
@@ -187,10 +187,43 @@ pub(crate) fn build_search_response(
     Value::Object(payload)
 }
 
+/// Assemble the structured response for the `summarize` tool.
+pub(crate) fn build_summarize_response(
+    outcome: SummarizeOutcome,
+    used_filters: Map<String, Value>,
+) -> Value {
+    let mut payload = Map::new();
+    payload.insert("summary".into(), Value::String(outcome.summary));
+    payload.insert(
+        "source_memory_ids".into(),
+        Value::Array(
+            outcome
+                .source_memory_ids
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    payload.insert(
+        "upserted_memory_id".into(),
+        Value::String(outcome.upserted_memory_id),
+    );
+    payload.insert("strategy".into(), Value::String(outcome.strategy_used));
+    if let Some(provider) = outcome.provider {
+        payload.insert("provider".into(), Value::String(provider));
+    }
+    if let Some(model) = outcome.model {
+        payload.insert("model".into(), Value::String(model));
+    }
+    payload.insert("used_filters".into(), Value::Object(used_filters));
+
+    Value::Object(payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CONFIG, Config, EmbeddingProvider};
+    use crate::config::{CONFIG, Config, EmbeddingProvider, SummarizationProvider};
     use crate::processing::QdrantHealthSnapshot;
     use serde_json::Value;
     use std::sync::Once;
@@ -213,6 +246,9 @@ mod tests {
                 search_default_limit: 5,
                 search_max_limit: 50,
                 search_default_score_threshold: 0.25,
+                summarization_provider: SummarizationProvider::Ollama,
+                summarization_model: Some("llama".into()),
+                summarization_max_words: 200,
             });
         });
     }

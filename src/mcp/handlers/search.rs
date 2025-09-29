@@ -290,13 +290,11 @@ fn validate_time_range(
         return Ok(None);
     }
 
-    if let (Some(start), Some(end)) = (start_dt, end_dt) {
-        if start > end {
-            return Err(McpError::invalid_params(
-                "`time_range.start` must be earlier than or equal to `time_range.end`",
-                None,
-            ));
-        }
+    if start_dt.zip(end_dt).is_some_and(|(start, end)| start > end) {
+        return Err(McpError::invalid_params(
+            "`time_range.start` must be earlier than or equal to `time_range.end`",
+            None,
+        ));
     }
 
     Ok(Some(range))
@@ -350,23 +348,19 @@ fn validate_search_request(
 
     let config = get_config();
 
-    if let Some(limit_value) = limit {
-        if limit_value < 1 || limit_value > config.search_max_limit {
-            return Err(McpError::invalid_params(
-                format!("`limit` must be between 1 and {}", config.search_max_limit),
-                None,
-            ));
-        }
+    if limit.is_some_and(|value| value < 1 || value > config.search_max_limit) {
+        return Err(McpError::invalid_params(
+            format!("`limit` must be between 1 and {}", config.search_max_limit),
+            None,
+        ));
     }
     let limit_value = limit.unwrap_or(config.search_default_limit);
 
-    if let Some(threshold) = score_threshold {
-        if !(0.0..=1.0).contains(&threshold) {
-            return Err(McpError::invalid_params(
-                "`score_threshold` must be between 0.0 and 1.0",
-                None,
-            ));
-        }
+    if score_threshold.is_some_and(|threshold| !(0.0..=1.0).contains(&threshold)) {
+        return Err(McpError::invalid_params(
+            "`score_threshold` must be between 0.0 and 1.0",
+            None,
+        ));
     }
     let threshold_value = score_threshold.unwrap_or(config.search_default_score_threshold);
 
@@ -446,7 +440,7 @@ fn map_search_error(error: SearchError) -> McpError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CONFIG, Config, EmbeddingProvider};
+    use crate::config::{CONFIG, Config, EmbeddingProvider, SummarizationProvider};
     use crate::processing::SearchHit;
     use serde_json::Value;
     use std::sync::Once;
@@ -469,6 +463,9 @@ mod tests {
                 search_default_limit: 5,
                 search_max_limit: 50,
                 search_default_score_threshold: 0.25,
+                summarization_provider: SummarizationProvider::Ollama,
+                summarization_model: Some("llama".into()),
+                summarization_max_words: 200,
             });
         });
     }

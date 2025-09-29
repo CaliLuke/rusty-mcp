@@ -14,10 +14,17 @@ use crate::{
         },
     },
     qdrant::{self, IndexSummary, PointInsert, QdrantService},
+    summarization::{SummarizationRequest as LlmSummarizationRequest, get_summarization_client},
 };
 use async_trait::async_trait;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+
+use super::summarize::{
+    EpisodicMemory, build_abstractive_prompt, build_extractive_summary, compute_summary_key,
+    sort_memories,
+};
+use super::types::SearchTimeRange as ProcSearchTimeRange;
 
 /// Coordinates the full ingestion pipeline: semantic chunking, embedding, and Qdrant writes.
 ///
@@ -338,6 +345,256 @@ impl ProcessingService {
             }
         }
     }
+
+    /// Summarize episodic (or chosen type) memories within a time range, persist a semantic summary, and return provenance.
+    pub(crate) async fn summarize_memories(
+        &self,
+        request: SummarizeRequest,
+    ) -> Result<SummarizeOutcome, SummarizeError> {
+        let config = get_config();
+        let collection = request
+            .collection
+            .clone()
+            .unwrap_or_else(|| config.qdrant_collection_name.clone());
+
+        // Validate time range
+        if request.time_range.start.is_none() || request.time_range.end.is_none() {
+            return Err(SummarizeError::InvalidTimeRange);
+        }
+
+        // Build episodic filter
+        let filter_args = qdrant::SearchFilterArgs {
+            project_id: request.project_id.clone(),
+            memory_type: request
+                .memory_type
+                .clone()
+                .or_else(|| Some("episodic".into())),
+            tags: request.tags.clone(),
+            time_range: Some(qdrant::SearchTimeRange {
+                start: request.time_range.start.clone(),
+                end: request.time_range.end.clone(),
+            }),
+        };
+        let filter = qdrant::build_search_filter(&filter_args);
+
+        // Scroll payloads (id + payload) and map into episodic items
+        let fields = serde_json::json!(["text", "timestamp"]);
+        let mut items = self
+            .qdrant_service
+            .scroll_payloads_with_ids(&collection, fields, filter)
+            .await
+            .map_err(SummarizeError::Qdrant)?
+            .into_iter()
+            .filter_map(|(id, payload)| {
+                let text = payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let timestamp = payload
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if text.trim().is_empty() {
+                    None
+                } else {
+                    Some(EpisodicMemory::new(id, text, timestamp))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // Sort chronologically and cap by limit
+        sort_memories(&mut items);
+        let limit = request.limit.unwrap_or(50);
+        if items.len() > limit {
+            items.truncate(limit);
+        }
+
+        if items.is_empty() {
+            return Err(SummarizeError::EmptyResult);
+        }
+
+        let source_memory_ids: Vec<String> = items.iter().map(|m| m.memory_id.clone()).collect();
+        let summary_key = compute_summary_key(
+            request.project_id.as_deref().unwrap_or("default"),
+            &ProcSearchTimeRange {
+                start: request.time_range.start.clone(),
+                end: request.time_range.end.clone(),
+            },
+            &source_memory_ids,
+        );
+
+        // Idempotency: check for existing summary via tag summary:<hash>
+        let idempotency_tag = format!("summary:{summary_key}");
+        let existing_filter = qdrant::build_search_filter(&qdrant::SearchFilterArgs {
+            project_id: request.project_id.clone(),
+            memory_type: Some("semantic".into()),
+            tags: Some(vec![idempotency_tag.clone()]),
+            time_range: None,
+        });
+        let existing = self
+            .qdrant_service
+            .scroll_payloads_with_ids(&collection, serde_json::json!(["text"]), existing_filter)
+            .await
+            .map_err(SummarizeError::Qdrant)?;
+        if let Some((existing_id, payload)) = existing.into_iter().next() {
+            let summary_text = payload
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            return Ok(SummarizeOutcome {
+                summary: summary_text,
+                source_memory_ids,
+                upserted_memory_id: existing_id,
+                strategy_used: strategy_to_label(&request.strategy),
+                provider: request.provider,
+                model: request.model,
+            });
+        }
+
+        // Choose summarization strategy
+        let mut chosen_strategy = request.strategy.clone().unwrap_or(SummarizeStrategy::Auto);
+        let mut provider_str = request.provider.clone();
+        let mut model_str = request.model.clone();
+
+        let mut summary_text = String::new();
+        if matches!(
+            chosen_strategy,
+            SummarizeStrategy::Auto | SummarizeStrategy::Abstractive
+        ) {
+            // Try abstractive path if provider active
+            if matches!(
+                config.summarization_provider,
+                crate::config::SummarizationProvider::Ollama
+            ) {
+                if model_str.is_none() {
+                    model_str = config.summarization_model.clone();
+                }
+                if provider_str.is_none() {
+                    provider_str = Some("ollama".into());
+                }
+                if let (Some(model), Some(client)) = (model_str.clone(), get_summarization_client())
+                {
+                    let prompt = build_abstractive_prompt(
+                        request.project_id.as_deref().unwrap_or("default"),
+                        &ProcSearchTimeRange {
+                            start: request.time_range.start.clone(),
+                            end: request.time_range.end.clone(),
+                        },
+                        request.max_words.unwrap_or(config.summarization_max_words),
+                        &items,
+                    );
+                    match client
+                        .generate_summary(LlmSummarizationRequest {
+                            model,
+                            prompt,
+                            max_words: request.max_words.unwrap_or(config.summarization_max_words),
+                        })
+                        .await
+                    {
+                        Ok(text) => {
+                            summary_text = text;
+                            chosen_strategy = SummarizeStrategy::Abstractive;
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, "Abstractive summarization failed; falling back to extractive");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extractive fallback or selection
+        if summary_text.is_empty() {
+            summary_text = build_extractive_summary(
+                &items,
+                request.max_words.unwrap_or(config.summarization_max_words),
+            );
+            if matches!(chosen_strategy, SummarizeStrategy::Auto) {
+                chosen_strategy = SummarizeStrategy::Extractive;
+            }
+        }
+
+        // Embed and upsert the summary as semantic
+        let vectors = self
+            .embedding_client
+            .generate_embeddings(vec![summary_text.clone()])
+            .await
+            .map_err(SummarizeError::Embedding)?;
+        let vector = vectors.into_iter().next().ok_or_else(|| {
+            SummarizeError::Embedding(crate::embedding::EmbeddingClientError::Configuration(
+                "no embedding generated".into(),
+            ))
+        })?;
+
+        let chunk_hash = qdrant::compute_chunk_hash(&summary_text);
+        let mut tags = request.tags.clone().unwrap_or_default();
+        tags.push("summary".into());
+        tags.push(format!("summary:{summary_key}"));
+
+        let overrides = qdrant::types::PayloadOverrides {
+            project_id: request.project_id.clone(),
+            memory_type: Some("semantic".into()),
+            tags: Some(tags),
+            source_uri: None,
+            source_memory_ids: Some(source_memory_ids.clone()),
+            summary_key: Some(summary_key.clone()),
+        };
+
+        self.ensure_collection(&collection)
+            .await
+            .map_err(|e| match e {
+                ProcessingError::Qdrant(err) => SummarizeError::Qdrant(err),
+                ProcessingError::Embedding(err) => SummarizeError::Embedding(err),
+                ProcessingError::Chunking(err) => {
+                    SummarizeError::GenerationFailed(format!("chunking failed: {err}"))
+                }
+            })?;
+
+        self.qdrant_service
+            .index_points(
+                &collection,
+                vec![PointInsert {
+                    text: summary_text.clone(),
+                    chunk_hash,
+                    vector,
+                }],
+                &overrides,
+            )
+            .await
+            .map_err(SummarizeError::Qdrant)?;
+
+        // Resolve ID of the inserted summary by scanning for the idempotency tag
+        let resolve = self
+            .qdrant_service
+            .scroll_payloads_with_ids(
+                &collection,
+                serde_json::json!(["text"]),
+                qdrant::build_search_filter(&qdrant::SearchFilterArgs {
+                    project_id: request.project_id.clone(),
+                    memory_type: Some("semantic".into()),
+                    tags: Some(vec![idempotency_tag.clone()]),
+                    time_range: None,
+                }),
+            )
+            .await
+            .map_err(SummarizeError::Qdrant)?;
+        let upserted_memory_id = resolve
+            .into_iter()
+            .map(|(id, _)| id)
+            .next()
+            .unwrap_or_default();
+
+        Ok(SummarizeOutcome {
+            summary: summary_text,
+            source_memory_ids,
+            upserted_memory_id,
+            strategy_used: strategy_to_label(&Some(chosen_strategy)),
+            provider: provider_str,
+            model: model_str,
+        })
+    }
 }
 
 #[async_trait]
@@ -365,5 +622,65 @@ impl ProcessingApi for ProcessingService {
 
     fn metrics_snapshot(&self) -> MetricsSnapshot {
         ProcessingService::metrics_snapshot(self)
+    }
+}
+
+/// Strategy selection for summarization.
+#[derive(Clone, Debug)]
+pub(crate) enum SummarizeStrategy {
+    /// Choose abstractive when provider available, else extractive.
+    Auto,
+    /// Use local LLM via provider.
+    Abstractive,
+    /// Deterministic bullet extraction.
+    Extractive,
+}
+
+/// Input parameters for summarization.
+#[derive(Clone, Debug)]
+pub(crate) struct SummarizeRequest {
+    pub project_id: Option<String>,
+    pub memory_type: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub time_range: ProcSearchTimeRange,
+    pub limit: Option<usize>,
+    pub strategy: Option<SummarizeStrategy>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub max_words: Option<usize>,
+    pub collection: Option<String>,
+}
+
+/// Errors surfaced from the summarization pipeline.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SummarizeError {
+    #[error("Failed to generate summary: {0}")]
+    GenerationFailed(String),
+    #[error("No episodic memories found for the requested scope")]
+    EmptyResult,
+    #[error("`time_range` must include both `start` and `end`")]
+    InvalidTimeRange,
+    #[error(transparent)]
+    Embedding(#[from] crate::embedding::EmbeddingClientError),
+    #[error(transparent)]
+    Qdrant(#[from] crate::qdrant::types::QdrantError),
+}
+
+/// Result of a summarization request.
+#[derive(Clone, Debug)]
+pub(crate) struct SummarizeOutcome {
+    pub summary: String,
+    pub source_memory_ids: Vec<String>,
+    pub upserted_memory_id: String,
+    pub strategy_used: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+fn strategy_to_label(strategy: &Option<SummarizeStrategy>) -> String {
+    match strategy {
+        Some(SummarizeStrategy::Abstractive) => "abstractive".into(),
+        Some(SummarizeStrategy::Extractive) => "extractive".into(),
+        _ => "auto".into(),
     }
 }

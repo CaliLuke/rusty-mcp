@@ -223,6 +223,127 @@ pub(crate) fn empty_object_schema() -> Map<String, Value> {
     finalize_object_schema(Map::new(), &[])
 }
 
+/// Build the schema describing the `summarize` tool input.
+pub(crate) fn summarize_input_schema() -> Map<String, Value> {
+    let config = get_config();
+    let max_limit = config.search_max_limit;
+
+    let mut properties = Map::new();
+
+    let mut project_schema = Map::new();
+    project_schema.insert("type".into(), Value::String("string".into()));
+    project_schema.insert(
+        "description".into(),
+        Value::String("Optional project filter; defaults to 'default' when omitted".into()),
+    );
+    project_schema.insert("default".into(), Value::String("default".into()));
+    properties.insert("project_id".into(), Value::Object(project_schema));
+
+    let mut memory_schema = Map::new();
+    memory_schema.insert("type".into(), Value::String("string".into()));
+    memory_schema.insert(
+        "description".into(),
+        Value::String("Memory type to summarize (default: 'episodic')".into()),
+    );
+    memory_schema.insert(
+        "enum".into(),
+        Value::Array(
+            ["episodic", "semantic", "procedural"]
+                .into_iter()
+                .map(|v| Value::String(v.into()))
+                .collect(),
+        ),
+    );
+    memory_schema.insert("default".into(), Value::String("episodic".into()));
+    properties.insert("memory_type".into(), Value::Object(memory_schema));
+
+    let mut tag_item_schema = Map::new();
+    tag_item_schema.insert("type".into(), Value::String("string".into()));
+    let mut tags_schema = Map::new();
+    tags_schema.insert("type".into(), Value::String("array".into()));
+    tags_schema.insert(
+        "description".into(),
+        Value::String("Optional contains-any tag filter applied to episodic memories".into()),
+    );
+    tags_schema.insert("items".into(), Value::Object(tag_item_schema));
+    properties.insert("tags".into(), Value::Object(tags_schema));
+
+    let mut time_range_properties = Map::new();
+    time_range_properties.insert(
+        "start".into(),
+        string_schema("Inclusive RFC3339 start timestamp"),
+    );
+    time_range_properties.insert(
+        "end".into(),
+        string_schema("Inclusive RFC3339 end timestamp"),
+    );
+    let mut time_range_schema = Map::new();
+    time_range_schema.insert("type".into(), Value::String("object".into()));
+    time_range_schema.insert("properties".into(), Value::Object(time_range_properties));
+    time_range_schema.insert("additionalProperties".into(), Value::Bool(false));
+    properties.insert("time_range".into(), Value::Object(time_range_schema));
+
+    let mut limit_schema = Map::new();
+    limit_schema.insert("type".into(), Value::String("integer".into()));
+    limit_schema.insert(
+        "description".into(),
+        Value::String("Maximum episodic memories to include in the summarization prompt".into()),
+    );
+    limit_schema.insert("minimum".into(), Value::Number(1.into()));
+    limit_schema.insert(
+        "maximum".into(),
+        Value::Number(serde_json::Number::from(max_limit as u64)),
+    );
+    limit_schema.insert("default".into(), Value::Number(50.into()));
+    properties.insert("limit".into(), Value::Object(limit_schema));
+
+    let mut strategy_schema = Map::new();
+    strategy_schema.insert("type".into(), Value::String("string".into()));
+    strategy_schema.insert(
+        "enum".into(),
+        Value::Array(
+            ["auto", "abstractive", "extractive"]
+                .into_iter()
+                .map(|v| Value::String(v.into()))
+                .collect(),
+        ),
+    );
+    strategy_schema.insert("default".into(), Value::String("auto".into()));
+    properties.insert("strategy".into(), Value::Object(strategy_schema));
+
+    let mut provider_schema = Map::new();
+    provider_schema.insert("type".into(), Value::String("string".into()));
+    provider_schema.insert(
+        "enum".into(),
+        Value::Array(vec![
+            Value::String("ollama".into()),
+            Value::String("none".into()),
+        ]),
+    );
+    properties.insert("provider".into(), Value::Object(provider_schema));
+
+    properties.insert(
+        "model".into(),
+        string_schema("Optional override for the summarization model"),
+    );
+
+    let mut max_words_schema = Map::new();
+    max_words_schema.insert("type".into(), Value::String("integer".into()));
+    max_words_schema.insert(
+        "description".into(),
+        Value::String("Word budget for the final summary (must be > 0)".into()),
+    );
+    max_words_schema.insert("minimum".into(), Value::Number(1.into()));
+    properties.insert("max_words".into(), Value::Object(max_words_schema));
+
+    properties.insert(
+        "collection".into(),
+        string_schema("Optional collection override"),
+    );
+
+    finalize_object_schema(properties, &["time_range"])
+}
+
 fn string_schema(description: &str) -> Value {
     let mut schema = Map::new();
     schema.insert("type".into(), Value::String("string".into()));

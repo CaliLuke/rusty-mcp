@@ -35,6 +35,10 @@ pub struct PayloadOverrides {
     pub tags: Option<Vec<String>>,
     /// Optional URI describing the chunk source.
     pub source_uri: Option<String>,
+    /// Optional provenance of episodic memories consolidated into this item.
+    pub source_memory_ids: Option<Vec<String>>,
+    /// Optional idempotency key for summaries.
+    pub summary_key: Option<String>,
 }
 
 /// Prepared point ready for indexing, including text, hash, and vector.
@@ -145,6 +149,8 @@ pub(crate) struct ScrollResult {
 
 #[derive(Deserialize)]
 pub(crate) struct ScrollPoint {
+    #[serde(default)]
+    pub(crate) id: Option<Value>,
     #[serde(default)]
     pub(crate) payload: Option<Map<String, Value>>,
 }
