@@ -29,13 +29,13 @@ use rmcp::{
         ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
     },
 };
-const MEMORY_TYPES_URI: &str = "mcp://rusty-mem/memory-types";
-const HEALTH_URI: &str = "mcp://rusty-mem/health";
-const PROJECTS_URI: &str = "mcp://rusty-mem/projects";
-const SETTINGS_URI: &str = "mcp://rusty-mem/settings";
-const USAGE_URI: &str = "mcp://rusty-mem/usage";
-const PROJECT_TAGS_TEMPLATE_URI: &str = "mcp://rusty-mem/projects/{project_id}/tags";
-const PROJECT_TAGS_PREFIX: &str = "mcp://rusty-mem/projects/";
+const MEMORY_TYPES_URI: &str = "mcp://memory-types";
+const HEALTH_URI: &str = "mcp://health";
+const PROJECTS_URI: &str = "mcp://projects";
+const SETTINGS_URI: &str = "mcp://settings";
+const USAGE_URI: &str = "mcp://usage";
+const PROJECT_TAGS_TEMPLATE_URI: &str = "mcp://{project_id}/tags";
+const PROJECT_TAGS_PREFIX: &str = "mcp://";
 const PROJECT_TAGS_SUFFIX: &str = "/tags";
 
 /// MCP server implementation exposing Rusty Memory operations.
@@ -53,18 +53,14 @@ impl RustyMemMcpServer {
     fn describe_tools(&self) -> Vec<Tool> {
         let push_schema = Arc::new(schemas::index_input_schema());
         let search_schema = Arc::new(schemas::search_input_schema());
-        let config = get_config();
-        let default_limit = config.search_default_limit;
-        let default_threshold = config.search_default_score_threshold;
-        let search_description = format!(
-            "Semantic search over indexed memories. Provide a short `query_text` plus optional filters (`project_id`/`project`, `memory_type`/`type`, `tags`, `time_range`, `collection`, `limit`/`k`).\n\nUsage policy: Do not paste large documents into prompts; index text with `push` first, then `search` to retrieve. Keep `query_text` concise (<=512 chars).\n\nDefaults: `limit={default_limit}`, `score_threshold={default_threshold}`. Response returns `results`, prompt-ready `context`, and `used_filters`. Example: {{\\n  \\\"query_text\\\": \\\"current architecture plan\\\",\\n  \\\"project_id\\\": \\\"default\\\",\\n  \\\"tags\\\": [\\\"architecture\\\"],\\n  \\\"limit\\\": {default_limit}\\n}}."
-        );
         let summarize_schema = Arc::new(schemas::summarize_input_schema());
         vec![
             Tool {
                 name: Cow::Borrowed("search"),
                 title: Some("Search Memories".to_string()),
-                description: Some(Cow::Owned(search_description)),
+                description: Some(Cow::Borrowed(
+                    "Retrieve the most relevant memories to ground your next step; add filters for project/type/tags/time.",
+                )),
                 input_schema: search_schema.clone(),
                 output_schema: None,
                 annotations: Some(
@@ -79,7 +75,7 @@ impl RustyMemMcpServer {
                 name: Cow::Borrowed("push"),
                 title: Some("Index Document".to_string()),
                 description: Some(Cow::Borrowed(
-                    "Split the provided text, embed each chunk, and upsert into Qdrant. Required: `text`. Optional: `collection`, `project_id`, `memory_type`, `tags`, `source_uri`. Defaults: `project_id=default`, `memory_type=semantic`.\n\nBest practice: Use `push` to index source material, then call `search` (and `summarize` when available). Avoid concatenating full documents in chat—let the memory store handle retrieval. The response echoes `chunksIndexed`, `chunkSize`, `inserted`, `updated`, and `skippedDuplicates`.",
+                    "Store source text as retrievable memory instead of pasting it into chats.",
                 )),
                 input_schema: push_schema.clone(),
                 output_schema: None,
@@ -95,7 +91,7 @@ impl RustyMemMcpServer {
                 name: Cow::Borrowed("get-collections"),
                 title: Some("List Collections".to_string()),
                 description: Some(Cow::Borrowed(
-                    "Return the Qdrant collection names known to this server. No parameters: pass {}.",
+                    "See which memory collections exist before you index or search.",
                 )),
                 input_schema: Arc::new(schemas::empty_object_schema()),
                 output_schema: None,
@@ -109,14 +105,14 @@ impl RustyMemMcpServer {
             },
             Tool {
                 name: Cow::Borrowed("new-collection"),
-                title: Some("Create Collection".to_string()),
+                title: Some("Create/Resize Collection".to_string()),
                 description: Some(Cow::Borrowed(
-                    "Ensure a Qdrant collection exists with the desired vector size. Required: `name` (string). Optional: `vector_size` (integer) overrides the server default. Example: {\n  \"name\": \"support-notes\",\n  \"vector_size\": 1536\n}.",
+                    "Create or resize a collection when starting a project or switching embedding dimensions.",
                 )),
                 input_schema: Arc::new(schemas::create_collection_input_schema()),
                 output_schema: None,
                 annotations: Some(
-                    ToolAnnotations::with_title("Create Collection")
+                    ToolAnnotations::with_title("Create/Resize Collection")
                         .destructive(false)
                         .idempotent(true)
                         .open_world(false),
@@ -127,7 +123,7 @@ impl RustyMemMcpServer {
                 name: Cow::Borrowed("metrics"),
                 title: Some("Metrics Snapshot".to_string()),
                 description: Some(Cow::Borrowed(
-                    "Fetch ingestion counters for documents and chunks processed so far. No parameters: send {}.",
+                    "Check ingestion volume and last chunk size at a glance.",
                 )),
                 input_schema: Arc::new(schemas::empty_object_schema()),
                 output_schema: None,
@@ -143,7 +139,7 @@ impl RustyMemMcpServer {
                 name: Cow::Borrowed("summarize"),
                 title: Some("Summarize Memories".to_string()),
                 description: Some(Cow::Borrowed(
-                    "Consolidate time-bounded episodic memories into a semantic summary. Required: `time_range`. Optional: `project_id`, `memory_type` (default 'episodic'), `tags`, `limit`, `strategy` (auto|abstractive|extractive), `provider`, `model`, `max_words`, `collection`. Produces `summary`, `source_memory_ids`, and `upserted_memory_id` and echoes `used_filters`.",
+                    "Turn episodic logs within a time window into a concise, reusable summary with provenance.",
                 )),
                 input_schema: summarize_schema.clone(),
                 output_schema: None,
@@ -193,7 +189,7 @@ impl RustyMemMcpServer {
             name: "project-tags".into(),
             title: Some("Project Tags".into()),
             description: Some(
-                "Enumerate distinct tags for a specific project: replace {project_id} and call readResource"
+                "Enumerate distinct tags for a project: replace {project_id} and call readResource"
                     .into(),
             ),
             mime_type: Some(super::format::APPLICATION_JSON.into()),
@@ -217,7 +213,7 @@ impl ServerHandler for RustyMemMcpServer {
                 .build(),
             server_info: implementation,
             instructions: Some(
-                "Rusty Memory MCP\n  1) listResources({}) → readResource URIs (memory-types, health, projects, usage)\n  2) readResource('mcp://rusty-mem/usage') → usage policy & recommended flows\n  3) listResourceTemplates({}) → fill mcp://rusty-mem/projects/{project_id}/tags\n  4) get-collections({}) → discover Qdrant collections\n  5) new-collection({ name, vector_size? }) → ensure collection/vector size\n  6) push({ text, project_id?, memory_type?, tags?, source_uri?, collection? })\n  7) search({ query_text, project_id?, memory_type?, tags?, time_range?, limit?, score_threshold?, collection? })\n  Policy: do not paste large documents; index with push → search. Invalid inputs return `invalid_params` with a short fix; all responses are structured JSON.".into(),
+                "Use this server to index, search, and summarize project memories for agents. Index source text, then retrieve concise context via semantic search with project/type/tag/time filters; summarize time‑bounded entries when needed.".into(),
             ),
             ..ServerInfo::default()
         }
@@ -322,7 +318,7 @@ impl ServerHandler for RustyMemMcpServer {
                             "Index text with `push` first; use `search` to retrieve.",
                             "Prefer filters: project_id, memory_type, tags, time_range.",
                             "Keep query_text concise (<= 512 chars).",
-                            "Use summarize (M9) to consolidate episodic → semantic summaries.",
+                            "Use summarize to consolidate episodic → semantic summaries.",
                         ],
                         "flows": [
                             {
@@ -333,7 +329,7 @@ impl ServerHandler for RustyMemMcpServer {
                                 ]
                             },
                             {
-                                "name": "Summarize (M9)",
+                                "name": "Summarize",
                                 "steps": [
                                     "search episodic within time_range",
                                     "summarize({ project_id, time_range, tags?, limit?, max_words? })"

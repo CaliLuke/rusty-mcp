@@ -1,4 +1,5 @@
 #![deny(missing_docs)]
+#![forbid(unsafe_code)]
 
 //! Rusty Memory is an educational memory server that demonstrates how to wire
 //! semantic chunking, embeddings, and Qdrant together behind both an HTTP API

@@ -62,7 +62,7 @@ If Qdrant already has a collection with a different vector size than `EMBEDDING_
 
 - Default file log: `logs/rusty-mem.log` in the current working directory.
 - Override path: set `RUSTY_MEM_LOG_FILE=/absolute/path/rusty-mem.log`.
-- Increase verbosity: `RUST_LOG=rustymcp=debug,tower_http=info`.
+- Increase verbosity: `RUST_LOG=rustymcp=debug,reqwest=info`.
 
 ## Windows path quirks in JSON configs
 

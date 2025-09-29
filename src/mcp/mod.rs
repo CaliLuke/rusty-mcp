@@ -4,8 +4,8 @@
 //! index and search memories over stdio. The surface area consists of:
 //!
 //! - Tools: `push` (index), `search`, `get-collections`, `new-collection`, and `metrics`.
-//! - Resources: `mcp://rusty-mem/memory-types`, `mcp://rusty-mem/health`,
-//!   `mcp://rusty-mem/projects`, and a templated `mcp://rusty-mem/projects/{project_id}/tags`.
+//! - Resources: `mcp://memory-types`, `mcp://health`,
+//!   `mcp://projects`, and a templated `mcp://projects/{project_id}/tags`.
 //!
 //! Handlers, schemas, and formatting helpers are kept in focused submodules to make tests and
 //! reviews small and targeted.

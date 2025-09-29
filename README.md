@@ -94,13 +94,19 @@ If you want to hack on the codebase or learn how it works internally, jump to De
 6. Try it
 
    From your agent, use:
-   - `push` (alias: `index`) → ingest text with optional metadata (`project_id`, `memory_type`, `tags`, `source_uri`)
+   - `push` → ingest text with optional metadata (`project_id`, `memory_type`, `tags`, `source_uri`)
    - `search` → retrieve memories semantically with filters for project, memory type, tags, time range, and score threshold
    - `summarize` → condense episodic memories into semantic summaries with provenance and idempotent `summary_key`s
    - `get-collections` → list Qdrant collections
    - `new-collection` → create or resize a collection
    - `metrics` → view counters (`documentsIndexed`, `chunksIndexed`, `lastChunkSize`)
-   - `listResources` → discover read-only resources; use `readResource` on `mcp://rusty-mem/memory-types`, `mcp://rusty-mem/projects`, and `mcp://rusty-mem/health` for metadata/health snapshots
+   - `listResources` → discover read-only resources; use `readResource` on:
+     - `mcp://memory-types`
+     - `mcp://projects`
+     - `mcp://health`
+     - `mcp://settings` (search defaults)
+     - `mcp://usage` (usage policy and recommended flows)
+     - Template: `mcp://{project_id}/tags`
 
 ## Optional: Run the HTTP server
 

@@ -83,7 +83,7 @@ graph TD
 
 ## Summarisation Pipeline
 
-1. **Argument normalisation** – The MCP `summarize` handler defaults the time window to the last 7 days (configurable), coerces tags, and tolerates scalar project/memory values.
+1. **Argument normalisation** – The MCP `summarize` handler requires an explicit `time_range` with both `start` and `end` (RFC3339). It coerces tags and tolerates scalar project/memory values.
 2. **Source retrieval** – A secondary search fetches candidate episodic memories within the requested window; results are ordered by timestamp.
 3. **Summary strategy** – When abstractive summarisation is available, the handler crafts a prompt containing the ordered memories, project context, and requested `summary_key`. When not, an extractive fallback concatenates key sentences under the configured word budget.
 4. **Persistence** – Successful summaries are re-ingested via the processing pipeline with `memory_type = "semantic"`, provenance (`source_memory_ids`), and a deterministic `summary_key` tag so replays are idempotent.
@@ -93,7 +93,7 @@ graph TD
 Rusty Memory exposes the following tools/resources through the MCP server:
 
 - Tools: `push`/`index`, `search`, `summarize`, `get-collections`, `new-collection`, `metrics`.
-- Resources: `memory-types`, `projects`, `projects/{project_id}/tags`, `health`, `settings`.
+- Resources: `memory-types`, `projects`, `projects/{project_id}/tags`, `health`, `settings`, `usage`.
 
 Each tool shares the `ProcessingService` instance, keeping behaviour aligned across transports and ensuring live validation exercises the full pipeline.
 

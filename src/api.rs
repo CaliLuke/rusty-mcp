@@ -215,7 +215,7 @@ async fn get_commands() -> Json<CommandsResponse> {
                 name: "index",
                 method: "POST",
                 path: "/index",
-                description: "Chunk a raw document, generate embeddings, and persist them in Qdrant. Response returns { \"chunks_indexed\": number, \"chunk_size\": number }.",
+                description: "Store source text as retrievable memory instead of pasting it into chats.",
                 request_example: Some(json!({
                     "text": "Document contents",
                     "collection": "optional-collection",
@@ -229,14 +229,14 @@ async fn get_commands() -> Json<CommandsResponse> {
                 name: "list_collections",
                 method: "GET",
                 path: "/collections",
-                description: "Return the names of Qdrant collections managed by this server.",
+                description: "See which memory collections exist before you index or search.",
                 request_example: None,
             },
             CommandDescriptor {
                 name: "create_collection",
                 method: "POST",
                 path: "/collections",
-                description: "Create a new Qdrant collection (non-destructive if it already exists).",
+                description: "Create or resize a collection when starting a project or switching embedding dimensions.",
                 request_example: Some(json!({
                     "name": "my-collection",
                     "vector_size": 1536
@@ -246,7 +246,7 @@ async fn get_commands() -> Json<CommandsResponse> {
                 name: "metrics",
                 method: "GET",
                 path: "/metrics",
-                description: "Return ingestion counters useful for observability dashboards.",
+                description: "Check ingestion volume and last chunk size at a glance.",
                 request_example: None,
             },
         ],
@@ -294,7 +294,7 @@ mod tests {
 
         assert_eq!(index.method, "POST");
         assert_eq!(index.path, "/index");
-        assert!(index.description.to_lowercase().contains("chunk"));
+        assert!(!index.description.is_empty());
 
         // ensure catalog exposes multiple commands for host discovery
         assert!(commands.len() >= 3);
