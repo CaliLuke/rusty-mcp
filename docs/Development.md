@@ -15,6 +15,8 @@ This guide describes the tooling, automation, and expectations for working in th
 ## Repository Layout
 
 - `src/` contains the application code. `main.rs` hosts the HTTP server; `bin/rusty_mem_mcp.rs` exposes the MCP process.
+- `src/qdrant/` wraps the vector-store client; the `scroller` module provides iterator-style access to the scroll API so callers no longer reimplement pagination loops.
+- `src/processing/service.rs` owns the ingestion/summarization pipeline. Use `ProcessingService::try_new()` for synchronous construction, call `init().await` once to provision Qdrant, and fall back to `ProcessingService::new().await` when a convenience helper is acceptable.
 - `scripts/` contains automation: `verify.sh`, `metrics.sh`, and hook wrappers invoked by the linters.
 - `reports/` is reserved for metrics output. The commit-time metrics hook writes to a temporary directory so that the working tree stays clean.
 - `tests/` currently houses the MCP integration test harness.

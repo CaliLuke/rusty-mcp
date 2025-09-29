@@ -27,6 +27,8 @@ type TokenCounter = Arc<dyn Fn(&str) -> usize + Send + Sync>;
 
 const MIN_AUTOMATIC_CHUNK_SIZE: usize = 256;
 const MAX_AUTOMATIC_CHUNK_SIZE: usize = 1024;
+const AGGRESSIVE_CHUNK_DIVISOR: usize = 4;
+const CONSERVATIVE_CHUNK_DIVISOR: usize = 8;
 
 /// Determine the chunk size for a request, respecting overrides and safe defaults.
 ///
@@ -47,7 +49,11 @@ pub(crate) fn determine_chunk_size(
     }
 
     let window = embedding_context_window(provider, model);
-    let divisor = if use_safe_defaults { 8 } else { 4 };
+    let divisor = if use_safe_defaults {
+        CONSERVATIVE_CHUNK_DIVISOR
+    } else {
+        AGGRESSIVE_CHUNK_DIVISOR
+    };
     let base = (window / divisor).max(1);
     let candidate = base.max(MIN_AUTOMATIC_CHUNK_SIZE);
     candidate.clamp(MIN_AUTOMATIC_CHUNK_SIZE, MAX_AUTOMATIC_CHUNK_SIZE)
@@ -306,24 +312,33 @@ fn tail_with_token_limit<'a>(
         return trimmed_text;
     }
 
-    let len = text.len();
-    let mut start = 0;
+    let positions = char_positions(text);
+    let mut low = 0usize;
+    let mut high = positions.len().saturating_sub(1);
+    let mut result: Option<&str> = None;
 
-    while start < len {
-        let next_start = text[start..]
-            .char_indices()
-            .nth(1)
-            .map(|(offset, _)| start + offset)
-            .unwrap_or(len);
-        start = next_start;
-        let candidate = &text[start..];
-        let trimmed = candidate.trim_start();
-        if token_counter.as_ref()(trimmed) <= token_limit {
-            return trimmed;
+    while low <= high {
+        let mid = (low + high) / 2;
+        if let Some(slice) = text.get(positions[mid]..)
+            && !slice.is_empty()
+        {
+            let trimmed = slice.trim_start();
+            if token_counter.as_ref()(trimmed) <= token_limit {
+                result = Some(trimmed);
+                if mid == 0 {
+                    break;
+                }
+                high = mid - 1;
+            } else {
+                low = mid + 1;
+            }
+        } else {
+            result = Some("");
+            break;
         }
     }
 
-    ""
+    result.unwrap_or("")
 }
 
 fn trim_to_token_budget(text: &str, token_budget: usize, token_counter: &TokenCounter) -> String {
@@ -335,24 +350,43 @@ fn trim_to_token_budget(text: &str, token_budget: usize, token_counter: &TokenCo
         return text.to_string();
     }
 
-    let len = text.len();
-    let mut start = 0;
+    let positions = char_positions(text);
+    let mut low = 0usize;
+    let mut high = positions.len().saturating_sub(1);
+    let mut result: Option<&str> = None;
 
-    while start < len {
-        let next_start = text[start..]
-            .char_indices()
-            .nth(1)
-            .map(|(offset, _)| start + offset)
-            .unwrap_or(len);
-        start = next_start;
-        let candidate = &text[start..];
-        let trimmed = candidate.trim_start();
-        if token_counter.as_ref()(trimmed) <= token_budget {
-            return trimmed.to_string();
+    while low <= high {
+        let mid = (low + high) / 2;
+        if let Some(slice) = text.get(positions[mid]..) {
+            let trimmed = slice.trim_start();
+            if token_counter.as_ref()(trimmed) <= token_budget {
+                result = Some(trimmed);
+                if mid == 0 {
+                    break;
+                }
+                high = mid - 1;
+            } else {
+                low = mid + 1;
+            }
+        } else {
+            break;
         }
     }
 
-    String::new()
+    result.map(str::to_string).unwrap_or_default()
+}
+
+fn char_positions(text: &str) -> Vec<usize> {
+    let mut positions = Vec::with_capacity(text.chars().count() + 2);
+    positions.push(0);
+    for (idx, _) in text.char_indices().skip(1) {
+        positions.push(idx);
+    }
+    let len = text.len();
+    if positions.last().copied().unwrap_or_default() != len {
+        positions.push(len);
+    }
+    positions
 }
 
 fn starts_with_whitespace(text: &str) -> bool {
@@ -478,5 +512,37 @@ mod tests {
 
         assert_eq!(aggressive, 1024);
         assert_eq!(conservative, 512);
+    }
+
+    #[test]
+    fn tail_with_token_limit_respects_budget_with_binary_search() {
+        let counter = default_token_counter();
+        let text = (0..100)
+            .map(|idx| format!("word{idx}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let result = tail_with_token_limit(&text, 10, &counter);
+        assert!(counter.as_ref()(result) <= 10);
+        assert!(text.ends_with(result.trim_start()));
+    }
+
+    #[test]
+    fn trim_to_token_budget_respects_budget_with_binary_search() {
+        let counter = default_token_counter();
+        let text = (0..100)
+            .map(|idx| format!("token{idx}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let trimmed = trim_to_token_budget(&text, 12, &counter);
+        assert!(counter.as_ref()(&trimmed) <= 12);
+        assert!(text.ends_with(trimmed.trim_start()));
+    }
+
+    #[test]
+    fn trim_to_token_budget_zero_budget_returns_empty() {
+        let counter = default_token_counter();
+        let text = "some text";
+        let trimmed = trim_to_token_budget(text, 0, &counter);
+        assert!(trimmed.is_empty());
     }
 }

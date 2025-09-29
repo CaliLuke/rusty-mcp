@@ -3,6 +3,8 @@
 pub mod client;
 pub mod filters;
 pub mod payload;
+/// Streaming helpers for Qdrant scroll pagination.
+pub mod scroller;
 pub mod types;
 
 pub use client::QdrantService;

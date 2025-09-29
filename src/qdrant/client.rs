@@ -1,15 +1,17 @@
 //! HTTP client wrapper for interacting with Qdrant.
 
 use crate::config::get_config;
+use crate::qdrant::scroller;
 use crate::qdrant::types::PayloadOverrides;
 use crate::qdrant::{
     filters::{accumulate_project_id, accumulate_tags},
     payload::{build_payload, current_timestamp_rfc3339, generate_memory_id},
     types::{
         IndexSummary, ListCollectionsResponse, QdrantError, QueryResponse, QueryResponseResult,
-        ScoredPoint, ScrollResponse,
+        ScoredPoint,
     },
 };
+use futures_util::{pin_mut, stream::StreamExt};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
@@ -375,54 +377,13 @@ impl QdrantService {
         with_payload: Value,
         filter: Option<Value>,
     ) -> Result<Vec<Map<String, Value>>, QdrantError> {
-        let mut offset: Option<Value> = None;
-        let mut payloads = Vec::new();
-        let filter_body = filter.unwrap_or_else(|| json!({ "must": [] }));
-
-        loop {
-            let mut body = json!({
-                "with_payload": with_payload.clone(),
-                "with_vector": false,
-                "limit": 512,
-                "offset": offset.clone().unwrap_or(Value::Null),
-                "filter": filter_body.clone(),
-            });
-
-            if offset.is_none() {
-                body.as_object_mut().unwrap().remove("offset");
-            }
-
-            let response = self
-                .request(
-                    Method::POST,
-                    &format!("collections/{collection}/points/scroll"),
-                )?
-                .json(&body)
-                .send()
-                .await?;
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                let error = QdrantError::UnexpectedStatus { status, body };
-                tracing::error!(collection, error = %error, "Failed to scroll payloads");
-                return Err(error);
-            }
-
-            let ScrollResponse { result } = response.json().await?;
-            for point in result.points {
-                if let Some(payload) = point.payload {
-                    payloads.push(payload);
-                }
-            }
-
-            match result.next_page_offset {
-                Some(next) => offset = Some(next),
-                None => break,
-            }
+        let mut results = Vec::new();
+        let stream = scroller::stream_payloads(self, collection, with_payload, filter);
+        pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+            results.push(item?);
         }
-
-        Ok(payloads)
+        Ok(results)
     }
 
     /// Scroll payloads and return their associated point identifiers.
@@ -432,53 +393,12 @@ impl QdrantService {
         with_payload: Value,
         filter: Option<Value>,
     ) -> Result<Vec<(String, Map<String, Value>)>, QdrantError> {
-        let mut offset: Option<Value> = None;
         let mut results = Vec::new();
-        let filter_body = filter.unwrap_or_else(|| json!({ "must": [] }));
-
-        loop {
-            let body = json!({
-                "with_payload": with_payload.clone(),
-                "with_vector": false,
-                "limit": 512,
-                "offset": offset.clone().unwrap_or(Value::Null),
-                "filter": filter_body,
-                "order_by": [
-                    { "key": "timestamp", "direction": "asc" }
-                ]
-            });
-
-            // Qdrant does not yet support `order_by` in scroll for all versions; keep it in body but tolerate errors.
-            let response = self
-                .request(
-                    Method::POST,
-                    &format!("collections/{collection}/points/scroll"),
-                )?
-                .json(&body)
-                .send()
-                .await?;
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                let error = QdrantError::UnexpectedStatus { status, body };
-                tracing::error!(collection, error = %error, "Failed to scroll payloads with ids");
-                return Err(error);
-            }
-
-            let ScrollResponse { result } = response.json().await?;
-            for point in result.points {
-                if let (Some(id), Some(payload)) = (point.id, point.payload) {
-                    results.push((stringify_point_id(id), payload));
-                }
-            }
-
-            match result.next_page_offset {
-                Some(next) => offset = Some(next),
-                None => break,
-            }
+        let stream = scroller::stream_payloads_with_ids(self, collection, with_payload, filter);
+        pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+            results.push(item?);
         }
-
         Ok(results)
     }
 }
@@ -496,7 +416,7 @@ fn format_endpoint(base: &str, path: &str) -> String {
     format!("{base}/{path}")
 }
 
-fn stringify_point_id(id: Value) -> String {
+pub(crate) fn stringify_point_id(id: Value) -> String {
     match id {
         Value::String(text) => text,
         Value::Number(number) => number.to_string(),

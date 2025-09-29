@@ -12,6 +12,7 @@
 
 mod format;
 pub mod handlers;
+mod registry;
 mod schemas;
 mod server;
 

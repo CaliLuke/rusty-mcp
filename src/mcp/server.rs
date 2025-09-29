@@ -14,8 +14,9 @@ use crate::{
             index::handle_push,
             metrics::handle_metrics,
             search::handle_search,
+            summarize::handle_summarize,
         },
-        schemas,
+        registry, schemas,
     },
     processing::ProcessingService,
 };
@@ -42,12 +43,30 @@ const PROJECT_TAGS_SUFFIX: &str = "/tags";
 #[derive(Clone)]
 pub struct RustyMemMcpServer {
     processing: Arc<ProcessingService>,
+    registry: Arc<registry::Registry>,
 }
 
 impl RustyMemMcpServer {
     /// Create a new MCP server using the supplied processing pipeline.
     pub fn new(processing: Arc<ProcessingService>) -> Self {
-        Self { processing }
+        let mut registry = registry::Registry::new();
+        registry.register_resource(MEMORY_TYPES_URI, resource_memory_types);
+        registry.register_resource(HEALTH_URI, resource_health);
+        registry.register_resource(PROJECTS_URI, resource_projects);
+        registry.register_resource(SETTINGS_URI, resource_settings);
+        registry.register_resource(USAGE_URI, resource_usage);
+
+        registry.register_tool("push", tool_push);
+        registry.register_tool("search", tool_search);
+        registry.register_tool("get-collections", tool_get_collections);
+        registry.register_tool("new-collection", tool_new_collection);
+        registry.register_tool("metrics", tool_metrics);
+        registry.register_tool("summarize", tool_summarize);
+
+        Self {
+            processing,
+            registry: Arc::new(registry),
+        }
     }
 
     fn describe_tools(&self) -> Vec<Tool> {
@@ -199,6 +218,171 @@ impl RustyMemMcpServer {
     }
 }
 
+fn resource_memory_types(
+    _server: &RustyMemMcpServer,
+    _request: ReadResourceRequestParam,
+) -> registry::ResourceFuture {
+    Box::pin(async move {
+        Ok(ReadResourceResult {
+            contents: vec![json_resource_contents(
+                MEMORY_TYPES_URI,
+                memory_types_payload(),
+            )],
+        })
+    })
+}
+
+fn resource_health(
+    server: &RustyMemMcpServer,
+    _request: ReadResourceRequestParam,
+) -> registry::ResourceFuture {
+    let processing = server.processing.clone();
+    Box::pin(async move {
+        let config = get_config();
+        let snapshot = processing.qdrant_health().await;
+        Ok(ReadResourceResult {
+            contents: vec![json_resource_contents(
+                HEALTH_URI,
+                health_payload(
+                    config.embedding_provider,
+                    &config.embedding_model,
+                    config.embedding_dimension,
+                    &config.qdrant_url,
+                    &config.qdrant_collection_name,
+                    &snapshot,
+                ),
+            )],
+        })
+    })
+}
+
+fn resource_projects(
+    server: &RustyMemMcpServer,
+    _request: ReadResourceRequestParam,
+) -> registry::ResourceFuture {
+    let processing = server.processing.clone();
+    Box::pin(async move {
+        let config = get_config();
+        let projects = processing
+            .list_projects(&config.qdrant_collection_name)
+            .await
+            .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+        let payload = ProjectsSnapshot {
+            projects: projects.into_iter().collect(),
+        };
+        Ok(ReadResourceResult {
+            contents: vec![json_resource_contents(
+                PROJECTS_URI,
+                serialize_json(&payload, PROJECTS_URI),
+            )],
+        })
+    })
+}
+
+fn resource_settings(
+    _server: &RustyMemMcpServer,
+    _request: ReadResourceRequestParam,
+) -> registry::ResourceFuture {
+    Box::pin(async move {
+        let config = get_config();
+        let payload = SettingsSnapshot {
+            search: SearchSettingsSnapshot {
+                default_limit: config.search_default_limit,
+                max_limit: config.search_max_limit,
+                default_score_threshold: config.search_default_score_threshold,
+            },
+        };
+        Ok(ReadResourceResult {
+            contents: vec![json_resource_contents(
+                SETTINGS_URI,
+                serialize_json(&payload, SETTINGS_URI),
+            )],
+        })
+    })
+}
+
+fn resource_usage(
+    _server: &RustyMemMcpServer,
+    _request: ReadResourceRequestParam,
+) -> registry::ResourceFuture {
+    Box::pin(async move {
+        let usage = serde_json::json!({
+            "title": "Rusty Memory MCP Usage",
+            "policy": [
+                "Do not paste or concatenate large documents in prompts.",
+                "Index text with `push` first; use `search` to retrieve.",
+                "Prefer filters: project_id, memory_type, tags, time_range.",
+                "Keep query_text concise (<= 512 chars).",
+                "Use summarize to consolidate episodic → semantic summaries.",
+            ],
+            "flows": [
+                {
+                    "name": "Ingest & Retrieve",
+                    "steps": [
+                        "push({ text, project_id?, memory_type?, tags? })",
+                        "search({ query_text, project_id?, memory_type?, tags?, time_range? })"
+                    ]
+                },
+                {
+                    "name": "Summarize",
+                    "steps": [
+                        "search episodic within time_range",
+                        "summarize({ project_id, time_range, tags?, limit?, max_words? })"
+                    ]
+                }
+            ]
+        });
+        Ok(ReadResourceResult {
+            contents: vec![json_resource_contents(
+                USAGE_URI,
+                serialize_json(&usage, USAGE_URI),
+            )],
+        })
+    })
+}
+
+fn tool_push(server: &RustyMemMcpServer, request: CallToolRequestParam) -> registry::ToolFuture {
+    let processing = server.processing.clone();
+    Box::pin(async move { handle_push(&processing, request.arguments).await })
+}
+
+fn tool_search(server: &RustyMemMcpServer, request: CallToolRequestParam) -> registry::ToolFuture {
+    let processing = server.processing.clone();
+    Box::pin(async move { handle_search(&processing, request.arguments).await })
+}
+
+fn tool_get_collections(
+    server: &RustyMemMcpServer,
+    _request: CallToolRequestParam,
+) -> registry::ToolFuture {
+    let processing = server.processing.clone();
+    Box::pin(async move { handle_list_collections(&processing).await })
+}
+
+fn tool_new_collection(
+    server: &RustyMemMcpServer,
+    request: CallToolRequestParam,
+) -> registry::ToolFuture {
+    let processing = server.processing.clone();
+    Box::pin(async move { handle_create_collection(&processing, request.arguments).await })
+}
+
+fn tool_metrics(
+    server: &RustyMemMcpServer,
+    _request: CallToolRequestParam,
+) -> registry::ToolFuture {
+    let processing = server.processing.clone();
+    Box::pin(async move { handle_metrics(&processing).await })
+}
+
+fn tool_summarize(
+    server: &RustyMemMcpServer,
+    request: CallToolRequestParam,
+) -> registry::ToolFuture {
+    let processing = server.processing.clone();
+    Box::pin(async move { handle_summarize(&processing, request.arguments).await })
+}
+
 impl ServerHandler for RustyMemMcpServer {
     fn get_info(&self) -> ServerInfo {
         let mut implementation = rmcp::model::Implementation::from_build_env();
@@ -254,157 +438,56 @@ impl ServerHandler for RustyMemMcpServer {
     ) -> impl std::future::Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
         let processing = self.processing.clone();
         async move {
-            match request.uri.as_str() {
-                MEMORY_TYPES_URI => Ok(ReadResourceResult {
-                    contents: vec![json_resource_contents(
-                        MEMORY_TYPES_URI,
-                        memory_types_payload(),
-                    )],
-                }),
-                HEALTH_URI => {
-                    let config = get_config();
-                    let snapshot = processing.qdrant_health().await;
-                    Ok(ReadResourceResult {
-                        contents: vec![json_resource_contents(
-                            HEALTH_URI,
-                            health_payload(
-                                config.embedding_provider,
-                                &config.embedding_model,
-                                config.embedding_dimension,
-                                &config.qdrant_url,
-                                &config.qdrant_collection_name,
-                                &snapshot,
-                            ),
-                        )],
-                    })
+            let uri = request.uri.clone();
+            if uri.starts_with(PROJECT_TAGS_PREFIX) && uri.ends_with(PROJECT_TAGS_SUFFIX) {
+                let project_segment =
+                    &uri[PROJECT_TAGS_PREFIX.len()..uri.len() - PROJECT_TAGS_SUFFIX.len()];
+                if project_segment.is_empty() {
+                    return Err(McpError::invalid_params(
+                        "Project identifier missing in resource URI",
+                        None,
+                    ));
                 }
-                PROJECTS_URI => {
-                    let config = get_config();
-                    let projects = processing
-                        .list_projects(&config.qdrant_collection_name)
-                        .await
-                        .map_err(|err| McpError::internal_error(err.to_string(), None))?;
-                    let payload = ProjectsSnapshot {
-                        projects: projects.into_iter().collect(),
-                    };
-                    Ok(ReadResourceResult {
-                        contents: vec![json_resource_contents(
-                            PROJECTS_URI,
-                            serialize_json(&payload, PROJECTS_URI),
-                        )],
-                    })
-                }
-                SETTINGS_URI => {
-                    let config = get_config();
-                    let payload = SettingsSnapshot {
-                        search: SearchSettingsSnapshot {
-                            default_limit: config.search_default_limit,
-                            max_limit: config.search_max_limit,
-                            default_score_threshold: config.search_default_score_threshold,
-                        },
-                    };
-                    Ok(ReadResourceResult {
-                        contents: vec![json_resource_contents(
-                            SETTINGS_URI,
-                            serialize_json(&payload, SETTINGS_URI),
-                        )],
-                    })
-                }
-                USAGE_URI => {
-                    let usage = serde_json::json!({
-                        "title": "Rusty Memory MCP Usage",
-                        "policy": [
-                            "Do not paste or concatenate large documents in prompts.",
-                            "Index text with `push` first; use `search` to retrieve.",
-                            "Prefer filters: project_id, memory_type, tags, time_range.",
-                            "Keep query_text concise (<= 512 chars).",
-                            "Use summarize to consolidate episodic → semantic summaries.",
-                        ],
-                        "flows": [
-                            {
-                                "name": "Ingest & Retrieve",
-                                "steps": [
-                                    "push({ text, project_id?, memory_type?, tags? })",
-                                    "search({ query_text, project_id?, memory_type?, tags?, time_range? })"
-                                ]
-                            },
-                            {
-                                "name": "Summarize",
-                                "steps": [
-                                    "search episodic within time_range",
-                                    "summarize({ project_id, time_range, tags?, limit?, max_words? })"
-                                ]
-                            }
-                        ]
-                    });
-                    Ok(ReadResourceResult {
-                        contents: vec![json_resource_contents(
-                            USAGE_URI,
-                            serialize_json(&usage, USAGE_URI),
-                        )],
-                    })
-                }
-                other
-                    if other.starts_with(PROJECT_TAGS_PREFIX)
-                        && other.ends_with(PROJECT_TAGS_SUFFIX) =>
-                {
-                    let project_segment =
-                        &other[PROJECT_TAGS_PREFIX.len()..other.len() - PROJECT_TAGS_SUFFIX.len()];
-                    if project_segment.is_empty() {
-                        return Err(McpError::invalid_params(
-                            "Project identifier missing in resource URI",
-                            None,
-                        ));
-                    }
-                    let config = get_config();
-                    let tags = processing
-                        .list_tags(&config.qdrant_collection_name, Some(project_segment))
-                        .await
-                        .map_err(|err| McpError::internal_error(err.to_string(), None))?;
-                    let payload = ProjectTagsSnapshot {
-                        project_id: project_segment.to_string(),
-                        tags: tags.into_iter().collect(),
-                    };
-                    Ok(ReadResourceResult {
-                        contents: vec![json_resource_contents(
-                            other,
-                            serialize_json(&payload, other),
-                        )],
-                    })
-                }
-                other => Err(McpError::invalid_params(
-                    format!("Unknown resource URI: {other}"),
-                    None,
-                )),
+                let config = get_config();
+                let tags = processing
+                    .list_tags(&config.qdrant_collection_name, Some(project_segment))
+                    .await
+                    .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+                let payload = ProjectTagsSnapshot {
+                    project_id: project_segment.to_string(),
+                    tags: tags.into_iter().collect(),
+                };
+                return Ok(ReadResourceResult {
+                    contents: vec![json_resource_contents(&uri, serialize_json(&payload, &uri))],
+                });
             }
+
+            if let Some(handler) = self.registry.resources.get(uri.as_str()) {
+                return handler(self, request).await;
+            }
+
+            Err(McpError::invalid_params(
+                format!("Unknown resource URI: {uri}"),
+                None,
+            ))
         }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn call_tool(
         &self,
         request: CallToolRequestParam,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
-        let processing = self.processing.clone();
         async move {
-            match request.name.as_ref() {
-                "push" => handle_push(&processing, request.arguments).await,
-                "search" => handle_search(&processing, request.arguments).await,
-                "get-collections" => handle_list_collections(&processing).await,
-                "new-collection" => handle_create_collection(&processing, request.arguments).await,
-                "metrics" => handle_metrics(&processing).await,
-                "summarize" => {
-                    crate::mcp::handlers::summarize::handle_summarize(
-                        &processing,
-                        request.arguments,
-                    )
-                    .await
-                }
-                other => Err(McpError::invalid_params(
-                    format!("Unknown tool: {other}"),
-                    None,
-                )),
+            if let Some(handler) = self.registry.tools.get(request.name.as_ref()) {
+                return handler(self, request).await;
             }
+
+            Err(McpError::invalid_params(
+                format!("Unknown tool: {}", request.name),
+                None,
+            ))
         }
     }
 }
